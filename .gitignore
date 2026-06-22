@@ -1,0 +1,39 @@
+# ==========================================
+# 1. Thư mục Build và Biên dịch (Meson/Ninja)
+# ==========================================
+build/
+build_static/
+subprojects/
+/.mesonpy/
+
+# ==========================================
+# 2. File cấu hình cho bộ phân tích code (LSP / Neovim)
+# ==========================================
+compile_commands.json
+.clangd/
+.ccls-cache/
+
+# ==========================================
+# 3. File dữ liệu kiểm thử (PCAP) và Log
+# ==========================================
+# Giữ lại thư mục pcap nhưng không đẩy các file .pcap nặng lên Git
+pcap/*.pcap
+!pcap/.gitkeep
+
+*.log
+*.out
+
+# ==========================================
+# 4. Các file nhị phân thực thi cuối cùng (Nếu có export ra ngoài)
+# ==========================================
+flowcore
+helloworld
+
+# ==========================================
+# 5. File tạm của Hệ điều hành và Trình soạn thảo
+# ==========================================
+.swp
+*~
+.DS_Store
+.idea/
+.vscode/
