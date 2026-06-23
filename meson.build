@@ -1,6 +1,6 @@
 project('flowtable_dpdk', 'c',
     version : '1.0.0',
-    default_options : ['warning_level=3', 'werror=true', 'c_std=c11']
+    default_options : ['warning_level=3', 'werror=true']
 )
 
 # Tự động check và lấy toàn bộ thư viện DPDK hệ thống
