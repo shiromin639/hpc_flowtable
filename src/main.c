@@ -52,7 +52,6 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
     retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd, &nb_txd);
     if (retval != 0)
         return retval;
-
     // allocate and setup n rx queue for the port, for this example, n = 1 
     for (q = 0; q < rx_rings; q++) {
         retval = rte_eth_rx_queue_setup(port, q, nb_rxd, 
@@ -177,6 +176,5 @@ main(int argc, char *argv[])
     lcore_main();
 
     rte_eal_cleanup();
-
     return 0;
 }
