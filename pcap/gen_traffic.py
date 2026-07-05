@@ -1,36 +1,26 @@
-from scapy.all import Ether, IP, UDP, PcapWriter
+from scapy.all import *
 import random
-import socket
-import struct
 
-def generate_random_ip():
-    # Generate a completely random IPv4 address
-    return socket.inet_ntoa(struct.pack('>I', random.randint(1, 0xffffffff)))
+# Cấu hình
+NUM_PACKETS = 500000  # Tạo 500,000 gói tin khác nhau
+OUTPUT_FILE = "./pcap/dynamic_flows.pcap"
+packets = []
 
-NUM_FLOWS = 100000
-OUTPUT_FILE = "./pcap/high_entropy_traffic.pcap"
+print(f"Đang sinh {NUM_PACKETS} gói tin ngẫu nhiên...")
 
-print(f"Generating {NUM_FLOWS} unique flows into {OUTPUT_FILE}...")
+for i in range(NUM_PACKETS):
+    # Sinh ngẫu nhiên IP Source và Port Source
+    src_ip = f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
+    src_port = random.randint(1024, 65535)
+    
+    # Tạo gói tin MAC -> IP -> UDP
+    pkt = Ether(dst="00:11:22:33:44:55", src="aa:bb:cc:dd:ee:ff") / \
+          IP(src=src_ip, dst="192.168.1.100") / \
+          UDP(sport=src_port, dport=80) / \
+          Raw(load="TestPayload1234567890")
+          
+    packets.append(pkt)
 
-# Use PcapWriter to write directly to disk, saving memory
-with PcapWriter(OUTPUT_FILE, append=False, sync=True) as pcap:
-    for i in range(NUM_FLOWS):
-        # Randomize Source IP and Source Port to guarantee unique 5-tuples
-        src_ip = generate_random_ip()
-        dst_ip = "192.168.1.100"
-        src_port = random.randint(1024, 65535)
-        dst_port = 53 # Simulating DNS traffic for your classification counter
-        
-        # Build the packet. 
-        # Adding a small payload to reach the standard 64-byte minimum frame size.
-        pkt = Ether(dst="00:11:22:33:44:55", src="aa:bb:cc:dd:ee:ff") / \
-              IP(src=src_ip, dst=dst_ip) / \
-              UDP(sport=src_port, dport=dst_port) / \
-              ("X" * 18) 
-              
-        pcap.write(pkt)
-        
-        if (i + 1) % 10000 == 0:
-            print(f"Generated {i + 1} packets...")
-
-print("Done! You can now use this PCAP with your DPDK application.")
+print("Đang ghi ra file PCAP...")
+wrpcap(OUTPUT_FILE, packets)
+print(f"Đã tạo xong file {OUTPUT_FILE}!")

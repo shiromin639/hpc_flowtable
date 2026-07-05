@@ -13,14 +13,16 @@
 #include <rte_mbuf.h>
 #include <rte_mbuf_core.h>
 #include <rte_hash.h>
+#include <rte_random.h>
 #include <rte_ring.h>
 #include <rte_ring_core.h>
+#include <rte_hash_crc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
 
-#define NUM_MBUFS 131071
+#define NUM_MBUFS 32767 
 #define NUM_WORKERS 4
 #define MBUF_CACHE_SIZE 250
 #define RX_DESC_PER_QUEUE 1024
@@ -303,10 +305,12 @@ worker_thread(void *arg)
                                        BURST_SIZE, NULL);
         if (unlikely(nb_rx == 0)) 
             continue;
-        rte_delay_us_block(2);
         nb_tx = rte_eth_tx_burst(PORT_OUT, worker_id, pkts, nb_rx);
         
         port_stats[lcore_id].tx_pkts += nb_tx;
+        for (i = 0; i < nb_tx; i++) {
+            port_stats[lcore_id].tx_bytes += pkts[i]->pkt_len;
+        }
         if (unlikely(nb_tx < nb_rx)) {
             for (i = nb_tx; i < nb_rx; i++) {
                 rte_pktmbuf_free(pkts[i]);
