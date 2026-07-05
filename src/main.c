@@ -36,6 +36,7 @@
 static struct rte_mempool *mbuf_pool;
 static struct rte_hash *flow_table;
 static struct rte_ring *worker_rings[NUM_WORKERS];
+static unsigned int worker_lcore_ids[NUM_WORKERS];
 volatile uint8_t force_quit;
 
 
@@ -143,125 +144,6 @@ ports_init(void)
     return 0;
 }
 
-
-// static int
-// dispatcher_thread(__rte_unused void *arg)
-// {
-//     struct rte_mbuf *pkts_burst[BURST_SIZE];
-//     struct rte_mbuf *worker_buffers[NUM_WORKERS][BURST_SIZE];
-//     uint16_t worker_counts[NUM_WORKERS];
-//     int i, w;
-//
-//     unsigned int lcore_id = rte_lcore_id();
-//
-//     printf("Dispatcher is running on lcore %u\n", lcore_id); 
-//
-//     // main loop
-//     while (!force_quit) {
-//         // init worker_counts
-//         memset(worker_counts, 0, sizeof(worker_counts));
-//
-//         // rx_burst
-//         const uint16_t nb_rx = rte_eth_rx_burst(PORT_IN, 0, pkts_burst, BURST_SIZE);
-//         if (unlikely(nb_rx == 0))
-//             continue;
-//
-//         port_stats[lcore_id].rx_pkts += nb_rx;
-//         /* Lấy thời gian hiện tại một lần cho cả batch (tiết kiệm cycle) */
-//         uint64_t current_tsc = rte_rdtsc();
-//
-//         for (i = 0; i < nb_rx; i++) {
-//             struct rte_mbuf *m = pkts_burst[i];
-//             port_stats[lcore_id].rx_bytes += m->pkt_len;
-//             struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-//
-//             if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
-//                 rte_pktmbuf_free(m);
-//                 continue;
-//             }
-//
-//             struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
-//
-//             if (ipv4_hdr->next_proto_id != IPPROTO_TCP && ipv4_hdr->next_proto_id != IPPROTO_UDP) {
-//                 rte_pktmbuf_free(m);
-//                 continue;
-//             }
-//
-//             /* Tạo Key */
-//             struct ipv4_5tuple_key key;
-//             key.ip_src = ipv4_hdr->src_addr;
-//             key.ip_dst = ipv4_hdr->dst_addr;
-//             key.proto  = ipv4_hdr->next_proto_id;
-//
-//             uint16_t *ports = (uint16_t *)((unsigned char *)ipv4_hdr + sizeof(struct rte_ipv4_hdr));
-//             key.port_src = ports[0];
-//             key.port_dst = ports[1];
-//
-//             /* ====================================================
-//              * CORE LOGIC: QUẢN LÝ FLOW TABLE & ROUTING
-//              * ==================================================== */
-//             uint32_t target_worker_id;
-//
-//             /* Tìm flow trong bảng băm */
-//             int flow_index = rte_hash_lookup(flow_table, &key);
-//
-//             if (flow_index < 0) {
-//                 /* KHÔNG TÌM THẤY -> ĐÂY LÀ FLOW MỚI */
-//                 flow_index = rte_hash_add_key(flow_table, &key);
-//
-//                 if (likely(flow_index >= 0)) {
-//                     /* Hash table trả về vị trí index, ta ghi đè vào mảng flow_entries */
-//                     flow_entries[flow_index].src_ip = key.ip_src;
-//                     flow_entries[flow_index].dst_ip = key.ip_dst;
-//                     flow_entries[flow_index].src_port = key.port_src;
-//                     flow_entries[flow_index].dst_port = key.port_dst;
-//                     flow_entries[flow_index].protocol = key.proto;
-//
-//                     /* Phân công Worker (Round-robin hoặc Hash). Ở đây dùng Hash modulo */
-//                     hash_sig_t hash_val = rte_hash_hash(flow_table, &key);
-//                     target_worker_id = hash_val % NUM_WORKERS;
-//
-//                     flow_entries[flow_index].worker_id = target_worker_id;
-//                     flow_entries[flow_index].create_time = current_tsc;
-//                     flow_entries[flow_index].last_seen = current_tsc;
-//
-//                     port_stats[lcore_id].flows_created++;
-//                 } else {
-//                     /* LỖI: Bảng băm đã đầy (Hash table full) -> Drop packet */
-//                     rte_pktmbuf_free(m);
-//                     continue; 
-//                 }
-//             } else {
-//                 /* ĐÃ TÌM THẤY -> FLOW ĐANG TỒN TẠI */
-//                 /* flow_index lúc này là index của flow cũ */
-//                 target_worker_id = flow_entries[flow_index].worker_id;
-//
-//                 /* Cập nhật timestamp để sau này làm cơ sở xóa flow (timeout) */
-//                 flow_entries[flow_index].last_seen = current_tsc;
-//             }
-//
-//             /* ==================================================== */
-//
-//             /* Đẩy gói tin vào buffer của worker tương ứng */
-//             worker_buffers[target_worker_id][worker_counts[target_worker_id]++] = m;
-//         }
-//
-//         /* Đẩy từ buffer tạm vào Ring (Tương tự như cũ) */
-//         for (w = 0; w < NUM_WORKERS; w++) {
-//             if (worker_counts[w] > 0) {
-//                 uint16_t sent = rte_ring_enqueue_burst(worker_rings[w], 
-//                                                       (void **)worker_buffers[w], 
-//                                                       worker_counts[w], NULL);
-//                 if (unlikely(sent < worker_counts[w])) {
-//                     for (i = sent; i < worker_counts[w]; i++) {
-//                         rte_pktmbuf_free(worker_buffers[w][i]);
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     return 0;
-// }
 static int
 dispatcher_thread_bulk(__rte_unused void *arg)
 {
@@ -441,8 +323,12 @@ stats_thread(__rte_unused void *arg)
     uint64_t prev_rx_bytes = 0, prev_tx_bytes = 0;
     uint64_t prev_flows_created = 0;
 
+    uint64_t prev_worker_tx_pkts[NUM_WORKERS] = { 0 };
+    uint64_t prev_worker_tx_bytes[NUM_WORKERS] = { 0 };
+
     printf("Statistics Collector is running on lcore %u\n", rte_lcore_id());
 
+    printf("\033[2J");
     while (!force_quit) {
         rte_delay_us_sleep(1000000); // Ngủ 1 giây
 
@@ -474,6 +360,7 @@ stats_thread(__rte_unused void *arg)
         int32_t active_flows = rte_hash_count(flow_table); 
 
         // Xóa màn hình và in (dùng \e[1;1H\e[2J để clear console trên Linux)
+        printf("\033[1;1H\033[J");
         printf("================ PERFORMANCE STATS ================\n");
         printf("RX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n", pps_rx, mbps_rx);
         printf("TX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n", pps_tx, mbps_tx);
@@ -481,6 +368,30 @@ stats_thread(__rte_unused void *arg)
         printf("Flow Rate     : %10"PRIu64" Created/sec\n", cps);
         printf("===================================================\n\n");
 
+        printf("\n==================== WORKERS DETAILS =======================\n");
+        printf("%-10s %-10s %-15s %-15s\n", "WorkerID", "LcoreID", "TX (PPS)", "TX (Mbps)");
+        printf("------------------------------------------------------------\n");
+        for (int w = 0; w < NUM_WORKERS; w++) {
+            unsigned int w_lcore = worker_lcore_ids[w];
+            
+            // Lấy dữ liệu thô hiện tại từ stats của core tương ứng
+            uint64_t w_total_tx_pkts = port_stats[w_lcore].tx_pkts;
+            uint64_t w_total_tx_bytes = port_stats[w_lcore].tx_bytes;
+
+            // Tính toán delta (tốc độ thực tế mỗi giây)
+            uint64_t w_pps_tx = w_total_tx_pkts - prev_worker_tx_pkts[w];
+            uint64_t w_mbps_tx = ((w_total_tx_bytes - prev_worker_tx_bytes[w]) * 8) / 1000000;
+
+            // In dòng dữ liệu của Worker
+            printf("Worker %-3d lcore %-3u %15"PRIu64" %15"PRIu64"\n", w, w_lcore, w_pps_tx, w_mbps_tx);
+
+            // Lưu lại giá trị vòng này cho worker
+            prev_worker_tx_pkts[w] = w_total_tx_pkts;
+            prev_worker_tx_bytes[w] = w_total_tx_bytes;
+        }
+        printf("============================================================\n\n");
+
+        fflush(stdout);
         // Lưu lại giá trị cho chu kỳ tính toán tiếp theo
         prev_rx_pkts = total_rx_pkts;
         prev_tx_pkts = total_tx_pkts;
@@ -489,7 +400,9 @@ stats_thread(__rte_unused void *arg)
         prev_flows_created = total_flows_created;
     }
     return 0;
-}static void
+}
+
+static void
 signal_handler(int sig_num)
 {
     printf("Exiting on signal %d\n", sig_num);
@@ -565,6 +478,7 @@ main(int argc, char *argv[])
         if (lcore_id == stats_lcore_id) continue;
         if (w_id >= NUM_WORKERS) break;
         wargs[w_id].worker_id = w_id;
+        worker_lcore_ids[w_id] = lcore_id;
         rte_eal_remote_launch(worker_thread, &wargs[w_id], lcore_id);
         w_id++;
     }
