@@ -1,6 +1,7 @@
-#include <generic/rte_prefetch.h>
+#include <generic/rte_spinlock.h>
 #include <netinet/in.h>
 #include <rte_build_config.h>
+#include <rte_cycles.h>
 #include <rte_jhash.h>
 #include <rte_byteorder.h>
 #include <rte_common.h>
@@ -14,9 +15,11 @@
 #include <rte_mbuf_core.h>
 #include <rte_hash.h>
 #include <rte_random.h>
+#include <rte_rcu_qsbr.h>
 #include <rte_ring.h>
 #include <rte_ring_core.h>
 #include <rte_hash_crc.h>
+#include <rte_malloc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,13 +38,13 @@
 #define PORT_OUT 1
 
 #define PREFETCH_OFFSET 4
+#define FLOW_TIMEOUT_SEC 5
 static struct rte_mempool *mbuf_pool;
 static struct rte_hash *flow_table;
 static struct rte_ring *worker_rings[NUM_WORKERS];
 static unsigned int worker_lcore_ids[NUM_WORKERS];
 volatile uint8_t force_quit;
-
-
+static rte_spinlock_t flow_lock;
 
 struct lcore_stats {
     uint64_t rx_pkts;
@@ -49,7 +52,7 @@ struct lcore_stats {
     uint64_t tx_pkts;
     uint64_t tx_bytes;
     uint64_t flows_created;
-    uint64_t flowt_deleted;
+    uint64_t flows_deleted;
 } __rte_cache_aligned;
 
 struct ipv4_5tuple_key {
@@ -58,6 +61,7 @@ struct ipv4_5tuple_key {
     uint16_t port_src;
     uint16_t port_dst;
     uint8_t  proto;
+    uint8_t pad[3];
 } __attribute__((__packed__));
 
 typedef struct {
@@ -154,7 +158,6 @@ dispatcher_thread_bulk(__rte_unused void *arg)
     uint16_t worker_counts[NUM_WORKERS];
     int i, w;
 
-    /* Các mảng chuyên dụng phục vụ Bulk Lookup */
     struct ipv4_5tuple_key keys[BURST_SIZE];
     const void *key_ptrs[BURST_SIZE];
     int32_t positions[BURST_SIZE];
@@ -166,16 +169,13 @@ dispatcher_thread_bulk(__rte_unused void *arg)
         memset(worker_counts, 0, sizeof(worker_counts));
 
         const uint16_t nb_rx = rte_eth_rx_burst(PORT_IN, 0, pkts_burst, BURST_SIZE);
-        if (unlikely(nb_rx == 0))
+        if (unlikely(nb_rx == 0)) {
             continue;
+        }
 
         port_stats[lcore_id].rx_pkts += nb_rx;
         uint64_t current_tsc = rte_rdtsc();
 
-        /* ====================================================
-         * BƯỚC 1: TIỀN XỬ LÝ (PRE-PROCESSING) & LẤY KHÓA
-         * Lọc các gói tin lỗi và trích xuất Five-Tuple vào mảng liên tục
-         * ==================================================== */
         uint16_t valid_pkts = 0;
         struct rte_mbuf *valid_mbufs[BURST_SIZE];
 
@@ -198,10 +198,8 @@ dispatcher_thread_bulk(__rte_unused void *arg)
                 continue;
             }
 
-            /* Gói tin hợp lệ, lưu lại mbuf để xử lý sau */
             valid_mbufs[valid_pkts] = m;
-
-            /* Trích xuất thông tin định danh vào struct liền kề trong mảng */
+            memset(&keys[valid_pkts], 0, sizeof(struct ipv4_5tuple_key));
             keys[valid_pkts].ip_src = ipv4_hdr->src_addr;
             keys[valid_pkts].ip_dst = ipv4_hdr->dst_addr;
             keys[valid_pkts].proto  = ipv4_hdr->next_proto_id;
@@ -210,77 +208,61 @@ dispatcher_thread_bulk(__rte_unused void *arg)
             keys[valid_pkts].port_src = ports[0];
             keys[valid_pkts].port_dst = ports[1];
 
-            /* Gán địa chỉ của key vào mảng con trỏ cho hàm Bulk */
             key_ptrs[valid_pkts] = &keys[valid_pkts];
             valid_pkts++;
         }
 
-        if (unlikely(valid_pkts == 0)) 
-            continue;
 
-        /* ====================================================
-         * BƯỚC 2: TRA CỨU HÀNG LOẠT (BULK LOOKUP)
-         * Hàm này giải quyết toàn bộ bài toán cache miss bằng phần cứng.
-         * Kết quả trả về mảng positions: >= 0 (Index), < 0 (Không tồn tại)
-         * ==================================================== */
-        rte_hash_lookup_bulk(flow_table, key_ptrs, valid_pkts, positions);
+        if (likely(valid_pkts > 0)) {
+            rte_hash_lookup_bulk(flow_table, key_ptrs, valid_pkts, positions);
 
-        /* ====================================================
-         * BƯỚC 3: XỬ LÝ TRẠNG THÁI & PHÂN TẢI
-         * Dựa vào mảng positions để quyết định Update hay Create Flow
-         * ==================================================== */
-        for (i = 0; i < valid_pkts; i++) {
-            struct rte_mbuf *m = valid_mbufs[i];
-            int flow_index = positions[i];
-            uint32_t target_worker_id;
+            for (i = 0; i < valid_pkts; i++) {
+                struct rte_mbuf *m = valid_mbufs[i];
+                int flow_index = positions[i];
+                uint32_t target_worker_id;
 
-            if (unlikely(flow_index < 0)) {
-                /* Flow Mới -> Thực hiện add key vào bảng */
-                flow_index = rte_hash_add_key(flow_table, key_ptrs[i]);
+                if (unlikely(flow_index < 0)) {
+                    rte_spinlock_lock(&flow_lock);
+                    flow_index = rte_hash_add_key(flow_table, key_ptrs[i]);
 
-                if (likely(flow_index >= 0)) {
-                    flow_entries[flow_index].src_ip = keys[i].ip_src;
-                    flow_entries[flow_index].dst_ip = keys[i].ip_dst;
-                    flow_entries[flow_index].src_port = keys[i].port_src;
-                    flow_entries[flow_index].dst_port = keys[i].port_dst;
-                    flow_entries[flow_index].protocol = keys[i].proto;
+                    if (likely(flow_index >= 0)) {
+                        flow_entries[flow_index].src_ip = keys[i].ip_src;
+                        flow_entries[flow_index].dst_ip = keys[i].ip_dst;
+                        flow_entries[flow_index].src_port = keys[i].port_src;
+                        flow_entries[flow_index].dst_port = keys[i].port_dst;
+                        flow_entries[flow_index].protocol = keys[i].proto;
 
-                    /* Băm IP Nguồn để chọn Worker (Logic của dự án) */
-                    hash_sig_t hash_val = rte_hash_hash(flow_table, key_ptrs[i]);
-                    target_worker_id = hash_val % NUM_WORKERS;
+                        hash_sig_t hash_val = rte_hash_hash(flow_table, key_ptrs[i]);
+                        target_worker_id = hash_val % NUM_WORKERS;
 
-                    flow_entries[flow_index].worker_id = target_worker_id;
-                    flow_entries[flow_index].create_time = current_tsc;
-                    flow_entries[flow_index].last_seen = current_tsc;
+                        flow_entries[flow_index].worker_id = target_worker_id;
+                        flow_entries[flow_index].create_time = current_tsc;
+                        flow_entries[flow_index].last_seen = current_tsc;
 
-                    port_stats[lcore_id].flows_created++;
+                        port_stats[lcore_id].flows_created++;
+                    } 
+                    rte_spinlock_unlock(&flow_lock);
+                    if (unlikely(flow_index < 0)) {
+                        rte_pktmbuf_free(m);
+                        continue; 
+                    }
                 } else {
-                    /* Lỗi đầy bảng băm */
-                    rte_pktmbuf_free(m);
-                    continue; 
+                    target_worker_id = flow_entries[flow_index].worker_id;
+                    flow_entries[flow_index].last_seen = current_tsc;
                 }
-            } else {
-                /* Flow Đã Tồn Tại -> Update Last Seen */
-                target_worker_id = flow_entries[flow_index].worker_id;
-                flow_entries[flow_index].last_seen = current_tsc;
+
+                worker_buffers[target_worker_id][worker_counts[target_worker_id]++] = m;
             }
 
-            /* Đưa gói tin vào Buffer đợi của Worker phụ trách */
-            worker_buffers[target_worker_id][worker_counts[target_worker_id]++] = m;
-        }
-
-        /* ====================================================
-         * BƯỚC 4: ENQUEUE VÀO RINGS
-         * Đẩy hàng loạt gói tin từ mảng tạm vào Lockless Ring
-         * ==================================================== */
-        for (w = 0; w < NUM_WORKERS; w++) {
-            if (worker_counts[w] > 0) {
-                uint16_t sent = rte_ring_enqueue_burst(worker_rings[w], 
-                                                      (void **)worker_buffers[w], 
-                                                      worker_counts[w], NULL);
-                if (unlikely(sent < worker_counts[w])) {
-                    for (i = sent; i < worker_counts[w]; i++) {
-                        rte_pktmbuf_free(worker_buffers[w][i]);
+            for (w = 0; w < NUM_WORKERS; w++) {
+                if (worker_counts[w] > 0) {
+                    uint16_t sent = rte_ring_enqueue_burst(worker_rings[w], 
+                                                          (void **)worker_buffers[w], 
+                                                          worker_counts[w], NULL);
+                    if (unlikely(sent < worker_counts[w])) {
+                        for (i = sent; i < worker_counts[w]; i++) {
+                            rte_pktmbuf_free(worker_buffers[w][i]);
+                        }
                     }
                 }
             }
@@ -326,7 +308,7 @@ stats_thread(__rte_unused void *arg)
     uint64_t prev_rx_pkts = 0, prev_tx_pkts = 0;
     uint64_t prev_rx_bytes = 0, prev_tx_bytes = 0;
     uint64_t prev_flows_created = 0;
-
+    uint64_t prev_flows_deleted = 0;
     uint64_t prev_worker_tx_pkts[NUM_WORKERS] = { 0 };
     uint64_t prev_worker_tx_bytes[NUM_WORKERS] = { 0 };
 
@@ -334,13 +316,40 @@ stats_thread(__rte_unused void *arg)
 
     printf("\033[2J");
     while (!force_quit) {
-        rte_delay_us_sleep(1000000); // Ngủ 1 giây
+        rte_delay_us_sleep(1000000); 
+
+        uint64_t timeout_cycles = FLOW_TIMEOUT_SEC * rte_get_tsc_hz();
+        const void *next_key;
+        void *next_data;
+        uint32_t iter = 0;
+        int32_t position;
+        uint32_t aged_out = 0;
+
+        while (1) {
+            rte_spinlock_lock(&flow_lock);
+            position = rte_hash_iterate(flow_table, &next_key, &next_data, &iter);
+            if (position < 0) {
+                rte_spinlock_unlock(&flow_lock);
+                break; 
+            }
+
+            uint64_t t_now = rte_rdtsc(); 
+            uint64_t last_seen = flow_entries[position].last_seen;
+
+            if (unlikely(t_now > last_seen && (t_now - last_seen) > timeout_cycles)) {
+                rte_hash_del_key(flow_table, next_key);
+                flow_entries[position].last_seen = t_now; 
+                aged_out++;
+            }
+            rte_spinlock_unlock(&flow_lock);
+        }   
+        port_stats[rte_lcore_id()].flows_deleted += aged_out;
 
         uint64_t total_rx_pkts = 0, total_tx_pkts = 0;
         uint64_t total_rx_bytes = 0, total_tx_bytes = 0;
         uint64_t total_flows_created = 0;
+        uint64_t total_flows_deleted = 0;
 
-        // Gom dữ liệu từ tất cả các Lcore một cách an toàn
         unsigned int lcore_id;
         RTE_LCORE_FOREACH(lcore_id) {
             total_rx_pkts += port_stats[lcore_id].rx_pkts;
@@ -348,60 +357,53 @@ stats_thread(__rte_unused void *arg)
             total_rx_bytes += port_stats[lcore_id].rx_bytes;
             total_tx_bytes += port_stats[lcore_id].tx_bytes;
             total_flows_created += port_stats[lcore_id].flows_created;
+            total_flows_deleted += port_stats[lcore_id].flows_deleted;
         }
 
-        // Tính toán thông số thời gian thực (Delta)
         uint64_t pps_rx = total_rx_pkts - prev_rx_pkts;
         uint64_t pps_tx = total_tx_pkts - prev_tx_pkts;
-        
-        // Công thức tính Mbps: (Bytes * 8 bit) / 1,000,000
         uint64_t mbps_rx = ((total_rx_bytes - prev_rx_bytes) * 8) / 1000000;
         uint64_t mbps_tx = ((total_tx_bytes - prev_tx_bytes) * 8) / 1000000;
-        
-        uint64_t cps = total_flows_created - prev_flows_created; // Connections Per Second
-        
-        // DPDK Hash table hỗ trợ lấy số lượng entry hiện tại trực tiếp (O(1))
+        uint64_t cps = total_flows_created - prev_flows_created; 
+        uint64_t dps = total_flows_deleted - prev_flows_deleted;
         int32_t active_flows = rte_hash_count(flow_table); 
 
-        // Xóa màn hình và in (dùng \e[1;1H\e[2J để clear console trên Linux)
         printf("\033[1;1H\033[J");
         printf("================ PERFORMANCE STATS ================\n");
         printf("RX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n", pps_rx, mbps_rx);
         printf("TX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n", pps_tx, mbps_tx);
         printf("Active Flows  : %10d Flows\n", active_flows);
-        printf("Flow Rate     : %10"PRIu64" Created/sec\n", cps);
+        printf("Created Flows : %10"PRIu64" Flows\n", total_flows_created); 
+        printf("Deleted/Timeout: %9"PRIu64" Flows\n", total_flows_deleted);
+        printf("Flow Rate     : %10"PRIu64" Created/sec | %10"PRIu64" Deleted/sec\n", cps, dps);
         printf("===================================================\n\n");
 
         printf("\n==================== WORKERS DETAILS =======================\n");
         printf("%-10s %-10s %-15s %-15s\n", "WorkerID", "LcoreID", "TX (PPS)", "TX (Mbps)");
-        printf("------------------------------------------------------------\n");
+        printf("------------------------------------------------------------\n");        
+
         for (int w = 0; w < NUM_WORKERS; w++) {
             unsigned int w_lcore = worker_lcore_ids[w];
-            
-            // Lấy dữ liệu thô hiện tại từ stats của core tương ứng
+
             uint64_t w_total_tx_pkts = port_stats[w_lcore].tx_pkts;
             uint64_t w_total_tx_bytes = port_stats[w_lcore].tx_bytes;
-
-            // Tính toán delta (tốc độ thực tế mỗi giây)
             uint64_t w_pps_tx = w_total_tx_pkts - prev_worker_tx_pkts[w];
             uint64_t w_mbps_tx = ((w_total_tx_bytes - prev_worker_tx_bytes[w]) * 8) / 1000000;
 
-            // In dòng dữ liệu của Worker
             printf("Worker %-3d lcore %-3u %15"PRIu64" %15"PRIu64"\n", w, w_lcore, w_pps_tx, w_mbps_tx);
 
-            // Lưu lại giá trị vòng này cho worker
             prev_worker_tx_pkts[w] = w_total_tx_pkts;
             prev_worker_tx_bytes[w] = w_total_tx_bytes;
         }
         printf("============================================================\n\n");
 
         fflush(stdout);
-        // Lưu lại giá trị cho chu kỳ tính toán tiếp theo
         prev_rx_pkts = total_rx_pkts;
         prev_tx_pkts = total_tx_pkts;
         prev_rx_bytes = total_rx_bytes;
         prev_tx_bytes = total_tx_bytes;
         prev_flows_created = total_flows_created;
+        prev_flows_deleted = total_flows_deleted;
     }
     return 0;
 }
@@ -447,6 +449,7 @@ main(int argc, char *argv[])
         rte_exit(EXIT_FAILURE, "Cannit init ports\n");
     }
 
+    rte_spinlock_init(&flow_lock);
     struct rte_hash_parameters hash_params = {
         .name = "flow_table",
         .entries = HASH_ENTRIES,
@@ -454,13 +457,13 @@ main(int argc, char *argv[])
         .hash_func = rte_jhash,
         .hash_func_init_val = 0,
         .socket_id = rte_socket_id(),
+        .extra_flag = RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY | RTE_HASH_EXTRA_FLAGS_MULTI_WRITER_ADD
     };
     
     flow_table = rte_hash_create(&hash_params);
     if (flow_table == NULL) {
         rte_exit(EXIT_FAILURE, "Cannot create hash_table\n");
     }
-
     for (i = 0; i < NUM_WORKERS; i++) {
         char name[32];
         snprintf(name, sizeof(name), "worker_ring_%d", i);
@@ -489,6 +492,7 @@ main(int argc, char *argv[])
 
     dispatcher_thread_bulk(NULL);
 
+    rte_eal_mp_wait_lcore();
     for (i = 0; i < NUM_WORKERS; i++) {
         rte_ring_free(worker_rings[i]);
     }
