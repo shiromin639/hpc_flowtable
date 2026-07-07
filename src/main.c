@@ -74,7 +74,7 @@ typedef struct {
     uint8_t worker_id;
     uint64_t create_time;
     uint64_t last_seen;
-} flow_entry_t;
+} __attribute__((aligned(32))) flow_entry_t;
 
 struct worker_args {
     uint32_t worker_id;
