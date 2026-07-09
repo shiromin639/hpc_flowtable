@@ -12,13 +12,14 @@ inc = include_directories('include')
 # Gom tất cả các file module lại để compile 
 sources = files(
     'src/main.c',
-    # 'src/flow_table.c',
-    # 'src/dispatcher.c',
-    # 'src/spi_engine.c',
-    # 'src/stats.c'
+    'src/flow_table.c',
+    'src/dispatcher.c',
+    'src/spi_engine.c',
+    'src/worker.c',
+    'src/stats.c'
 )
 
-# Sinh ra file thực thi cuối cùng [cite: 118]
+# Sinh ra file thực thi cuối cùng
 executable('flowcore',
     sources,
     include_directories : inc,

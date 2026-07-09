@@ -19,15 +19,22 @@ compile_commands.json
 # Giữ lại thư mục pcap nhưng không đẩy các file .pcap nặng lên Git
 pcap/*.pcap
 !pcap/.gitkeep
+tests/generated/*
+!tests/generated/.gitignore
+tests/__pycache__/
 
 *.log
 *.out
+*.pid
+core
+core.*
 
 # ==========================================
 # 4. Các file nhị phân thực thi cuối cùng (Nếu có export ra ngoài)
 # ==========================================
 flowcore
 helloworld
+src/main
 
 # ==========================================
 # 5. File tạm của Hệ điều hành và Trình soạn thảo
