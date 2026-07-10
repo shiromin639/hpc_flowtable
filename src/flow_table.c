@@ -1,5 +1,6 @@
 #include "flow_table.h"
 #include "common.h"
+#include <rte_build_config.h>
 #include <rte_hash.h>
 #include <rte_jhash.h>
 #include <rte_hash_crc.h>
@@ -11,6 +12,32 @@
 #include <string.h>
 
 static struct flow_table_ctx g_ft_ctx;
+
+static uint32_t
+flush_expired_batch(const void **expired_keys, const uint32_t *expired_positions,
+        uint32_t expired_count, uint64_t t_now, uint64_t timeout_cycles)
+{
+    uint32_t total_deleted = 0;
+
+    for (uint32_t i = 0; i < expired_count; i++) {
+        uint32_t position = expired_positions[i];
+        uint64_t last_seen;
+        int ret;
+
+        if (unlikely(position >= g_ft_ctx.storage_entries))
+            continue;
+
+        last_seen = flow_hot_last_seen_load(&g_ft_ctx.hot[position]);
+        if (!(t_now > last_seen) || (t_now - last_seen) <= timeout_cycles)
+            continue;
+
+        ret = rte_hash_del_key(g_ft_ctx.hash, expired_keys[i]);
+        if (likely(ret >= 0))
+            total_deleted++;
+    }
+
+    return total_deleted;
+}
 
 int
 flow_table_init(int socket_id)
@@ -134,6 +161,7 @@ flow_table_aging_tick(void)
     uint64_t t_now = rte_rdtsc();
 
     const void *expired_keys[AGING_BATCH_SIZE];
+    uint32_t expired_positions[AGING_BATCH_SIZE];
     uint32_t expired_count = 0;
     uint32_t total_deleted = 0;
     uint32_t chunk = g_ft_ctx.current_chunk;
@@ -149,31 +177,26 @@ flow_table_aging_tick(void)
         if (((uint32_t)position % AGING_NUM_CHUNKS) != chunk)
             continue;
 
-        uint64_t last_seen = g_ft_ctx.hot[position].last_seen;
+        uint64_t last_seen = flow_hot_last_seen_load(&g_ft_ctx.hot[position]);
 
         if (likely(t_now > last_seen) &&
             unlikely((t_now - last_seen) > timeout_cycles)) {
 
             expired_keys[expired_count++] = next_key;
+            expired_positions[expired_count - 1] = (uint32_t)position;
 
             /* Flush batch when buffer full */
             if (expired_count >= AGING_BATCH_SIZE) {
-                for (uint32_t i = 0; i < expired_count; i++) {
-                    int ret = rte_hash_del_key(g_ft_ctx.hash,
-                                               expired_keys[i]);
-                    if (likely(ret >= 0))
-                        total_deleted++;
-                }
+                total_deleted += flush_expired_batch(expired_keys,
+                        expired_positions, expired_count, t_now,
+                        timeout_cycles);
                 expired_count = 0;
             }
         }
     }
 
-    for (uint32_t i = 0; i < expired_count; i++) {
-        int ret = rte_hash_del_key(g_ft_ctx.hash, expired_keys[i]);
-        if (likely(ret >= 0))
-            total_deleted++;
-    }
+    total_deleted += flush_expired_batch(expired_keys, expired_positions,
+            expired_count, t_now, timeout_cycles);
 
     g_ft_ctx.current_chunk = (chunk + 1) % AGING_NUM_CHUNKS;
     return total_deleted;

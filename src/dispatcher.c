@@ -115,7 +115,7 @@ dispatcher_thread(__rte_unused void *arg)
                 if (unlikely(duplicate_idx >= 0)) {
                     flow_idx = resolved_positions[duplicate_idx];
                     target_worker = resolved_workers[duplicate_idx];
-                    ft->hot[flow_idx].last_seen = current_tsc;
+                    flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
 
                     m->hash.fdir.lo = (uint32_t)flow_idx;
                     m->hash.fdir.hi = ft->hot[flow_idx].flow_gen;
@@ -134,6 +134,12 @@ dispatcher_thread(__rte_unused void *arg)
                             continue;
                         }
 
+                        /*
+                         * Publish activity timestamp immediately so aging
+                         * does not observe a freshly added flow as stale.
+                         */
+                        flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
+
                         ft->cold[flow_idx].src_ip   = keys[i].ip_src;
                         ft->cold[flow_idx].dst_ip   = keys[i].ip_dst;
                         ft->cold[flow_idx].src_port = keys[i].port_src;
@@ -150,7 +156,6 @@ dispatcher_thread(__rte_unused void *arg)
                         ft->hot[flow_idx].worker_id = target_worker;
                         ft->hot[flow_idx].spi_action = SPI_ACTION_UNKNOWN;
                         ft->hot[flow_idx].action_version = 0;
-                        ft->hot[flow_idx].last_seen = current_tsc;
                         lcore_stats[lcore_id].flows_created++;
                     } else {
                         rte_pktmbuf_free(m);
@@ -162,7 +167,7 @@ dispatcher_thread(__rte_unused void *arg)
                         continue;
                     }
                     target_worker = ft->hot[flow_idx].worker_id;
-                    ft->hot[flow_idx].last_seen = current_tsc;
+                    flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
                 }
 
                 resolved_indices[resolved_count] = i;

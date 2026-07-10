@@ -6,6 +6,7 @@
 #include <rte_rcu_qsbr.h>
 #include <rte_hash_crc.h>
 #include <rte_cycles.h>
+#include <stdint.h>
 
 struct ipv4_5tuple_key {
     uint32_t ip_src;
@@ -43,6 +44,18 @@ struct flow_table_ctx {
     struct flow_cold_data *cold;        
     uint32_t              current_chunk; 
 };
+
+static inline uint64_t
+flow_hot_last_seen_load(const struct flow_hot_data *hot)
+{
+    return __atomic_load_n(&hot->last_seen, __ATOMIC_RELAXED);
+}
+
+static inline void
+flow_hot_last_seen_store(struct flow_hot_data *hot, uint64_t tsc)
+{
+    __atomic_store_n(&hot->last_seen, tsc, __ATOMIC_RELAXED);
+}
 
 int flow_table_init(int socket_id);
 void flow_table_destroy(void);
