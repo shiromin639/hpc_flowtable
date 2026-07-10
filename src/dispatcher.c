@@ -69,6 +69,9 @@ dispatcher_thread(__rte_unused void *arg)
         struct rte_mbuf *valid_mbufs[BURST_SIZE];
 
         for (int i = 0; i < nb_rx; i++) {
+            // if (i + 3 < nb_rx) {
+            //     rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i + 3], void *));
+            // }
             struct rte_mbuf *m = pkts_burst[i];
             port_stats[lcore_id].rx_bytes += m->pkt_len;
 

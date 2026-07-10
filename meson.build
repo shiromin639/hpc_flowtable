@@ -3,6 +3,8 @@ project('flowtable_dpdk', 'c',
     # default_options : ['warning_level=3', 'werror=true']
 )
 
+add_project_arguments('-DALLOW_EXPERIMENTAL_API', language: 'c')
+
 # Tự động check và lấy toàn bộ thư viện DPDK hệ thống
 dpdk_dep = dependency('libdpdk', required : true)
 
@@ -12,6 +14,7 @@ inc = include_directories('include')
 # Gom tất cả các file module lại để compile 
 sources = files(
     'src/main.c',
+    'src/app_init.c',
     'src/flow_table.c',
     'src/dispatcher.c',
     'src/spi_engine.c',
@@ -26,3 +29,14 @@ executable('flowcore',
     dependencies : dpdk_dep,
     install : false
 )
+
+functional_test_exe = executable('flowcore_functional_tests',
+    'tests/flowcore_functional_tests.c',
+    c_args : [
+        '-DPROJECT_ROOT="' + meson.project_source_root() + '"',
+        '-DFLOWCORE_BIN="' + meson.project_build_root() + '/flowcore"',
+    ],
+    install : false
+)
+
+test('flowcore-functional', functional_test_exe)

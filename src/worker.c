@@ -2,6 +2,7 @@
  * worker.c - Worker threads: SPI enforcement + protocol stats + TX
  */
 
+#include "app_threads.h"
 #include "common.h"
 #include "flow_table.h"
 #include "spi_engine.h"
@@ -78,10 +79,6 @@ extract_packet_cold(struct rte_mbuf *m, struct flow_cold_data *cold)
     return 0;
 }
 
-struct worker_args {
-    uint32_t worker_id;
-};
-
 int
 worker_thread(void *arg)
 {
@@ -103,11 +100,11 @@ worker_thread(void *arg)
             continue;
 
         uint16_t tx_count = 0;
+        uint32_t active_rule_version = spi_rule_engine_version();
 
         for (uint16_t i = 0; i < nb_rx; i++) {
             uint32_t flow_idx = pkts[i]->hash.fdir.lo;
             uint32_t flow_gen = pkts[i]->hash.fdir.hi;
-            uint32_t active_rule_version = spi_rule_engine_version();
             struct flow_cold_data parsed_cold;
             const struct flow_cold_data *cold;
             uint8_t action;

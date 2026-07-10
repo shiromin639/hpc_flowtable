@@ -26,7 +26,15 @@ The key design choice is to assert on:
 - `flowcore` stdout statistics
 - SPI reload log messages
 
-This gives deterministic signals without requiring packet sniffing on host interfaces or a multi-queue egress device.
+This gives deterministic signals without requiring packet sniffing on host
+interfaces or a multi-queue egress device.
+
+Why not `tx_pcap` for the current suite:
+
+- the application configures `PORT_OUT` with `NUM_WORKERS` TX queues
+- DPDK `net_pcap` TX exposes only one queue in this environment
+- the current four-worker topology therefore cannot use `tx_pcap` as the
+  egress device without changing the runtime design
 
 ## Functional Tests
 
@@ -101,7 +109,21 @@ Checks:
 Purpose:
 - verifies aging loop behavior without requiring timestamp-aware replay
 
-### 6. Hot Reload
+### 6. Dispatcher Filtering
+
+Input:
+- one IPv4 ICMP packet
+- one ARP packet
+
+Checks:
+- no flows created
+- no packets forwarded
+- worker protocol counters remain at zero
+
+Purpose:
+- verifies that non-TCP/UDP and non-IPv4 traffic is dropped before worker handoff
+
+### 7. Hot Reload
 
 Input:
 - looping PCAP with TCP destination port `8443`

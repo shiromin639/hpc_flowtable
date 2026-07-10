@@ -121,6 +121,35 @@ def udp_pkt(src_ip: str, dst_ip: str, sport: int, dport: int):
     return ethernet_header() + ipv4_header(src_ip, dst_ip, 17, len(l4)) + l4
 
 
+def icmp_echo_pkt(src_ip: str, dst_ip: str, ident: int = 1,
+        seq: int = 1) -> bytes:
+    payload = b"flowcore-icmp"
+    icmp_hdr = struct.pack("!BBHHH", 8, 0, 0, ident & 0xFFFF, seq & 0xFFFF)
+    icmp_checksum = checksum(icmp_hdr + payload)
+    l4 = struct.pack("!BBHHH", 8, 0, icmp_checksum,
+                     ident & 0xFFFF, seq & 0xFFFF) + payload
+    return ethernet_header() + ipv4_header(src_ip, dst_ip, 1, len(l4)) + l4
+
+
+def arp_request(src_ip: str, target_ip: str) -> bytes:
+    dst_mac = bytes.fromhex("ffffffffffff")
+    src_mac = bytes.fromhex("aabbccddeeff")
+    ether_type = struct.pack("!H", 0x0806)
+    arp_hdr = struct.pack(
+        "!HHBBH6s4s6s4s",
+        1,
+        0x0800,
+        6,
+        4,
+        1,
+        src_mac,
+        socket.inet_aton(src_ip),
+        b"\x00" * 6,
+        socket.inet_aton(target_ip),
+    )
+    return dst_mac + src_mac + ether_type + arp_hdr
+
+
 def write_pcap(path: Path, packets: list[bytes]) -> None:
     with path.open("wb") as fp:
         fp.write(struct.pack("<IHHIIII",
@@ -174,6 +203,14 @@ def generate_pcaps() -> None:
     write_pcap(
         GENERATED_DIR / "reload_8443_loop.pcap",
         [tcp_pkt("172.16.0.1", "192.168.10.1", 32000 + i, 8443) for i in range(8)],
+    )
+
+    write_pcap(
+        GENERATED_DIR / "non_tcp_udp_filtered.pcap",
+        [
+            icmp_echo_pkt("10.9.0.1", "192.168.9.1"),
+            arp_request("10.9.0.2", "10.9.0.254"),
+        ],
     )
 
     write_pcap(

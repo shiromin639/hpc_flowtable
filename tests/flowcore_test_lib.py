@@ -6,9 +6,11 @@ import re
 import signal
 import struct
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TextIO
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +31,13 @@ class FlowcoreRunResult:
     metrics: dict
     tx_packet_count: int
     tx_pcap: Path | None
+
+
+@dataclass
+class FlowcoreHandle:
+    proc: subprocess.Popen[None]
+    command: list[str]
+    output_file: TextIO
 
 
 def strip_ansi(text: str) -> str:
@@ -142,50 +151,56 @@ def build_flowcore_cmd(rx_pcap: Path, tx_pcap: Path | None,
 
 def launch_flowcore(rx_pcap: Path, tx_pcap: Path | None, rules_path: Path,
         infinite_rx: bool = False, output_mode: str = "null"
-        ) -> tuple[subprocess.Popen[str], list[str]]:
+        ) -> FlowcoreHandle:
     env = os.environ.copy()
     env["XDG_RUNTIME_DIR"] = "/tmp"
     env["FLOWCORE_NUM_MBUFS"] = env.get("FLOWCORE_NUM_MBUFS", DEFAULT_MBUF_COUNT)
     env["FLOWCORE_RULES_PATH"] = str(rules_path)
 
     cmd = build_flowcore_cmd(rx_pcap, tx_pcap, infinite_rx, output_mode)
+    output_file = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
     proc = subprocess.Popen(
         cmd,
         cwd=REPO_ROOT,
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=output_file,
         stderr=subprocess.STDOUT,
-        text=True,
     )
-    return proc, cmd
+    return FlowcoreHandle(proc=proc, command=cmd, output_file=output_file)
 
 
-def stop_flowcore(proc: subprocess.Popen[str], timeout_sec: float = 5.0) -> str:
+def stop_flowcore(handle: FlowcoreHandle, timeout_sec: float = 5.0) -> str:
+    proc = handle.proc
+
     if proc.poll() is None:
         proc.send_signal(signal.SIGINT)
 
     try:
-        stdout, _ = proc.communicate(timeout=timeout_sec)
+        proc.wait(timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         proc.kill()
-        stdout, _ = proc.communicate(timeout=timeout_sec)
+        proc.wait(timeout=timeout_sec)
 
+    handle.output_file.flush()
+    handle.output_file.seek(0)
+    stdout = handle.output_file.read()
+    handle.output_file.close()
     return stdout
 
 
 def run_flowcore(rx_pcap: Path, tx_pcap: Path | None, rules_path: Path,
         runtime_sec: float = 3.0, infinite_rx: bool = False,
         output_mode: str = "null") -> FlowcoreRunResult:
-    proc, cmd = launch_flowcore(rx_pcap, tx_pcap, rules_path,
+    handle = launch_flowcore(rx_pcap, tx_pcap, rules_path,
             infinite_rx=infinite_rx, output_mode=output_mode)
     time.sleep(runtime_sec)
-    output = stop_flowcore(proc)
+    output = stop_flowcore(handle)
     metrics = parse_metrics(output)
     tx_count = count_pcap_packets(tx_pcap) if tx_pcap is not None else 0
 
     return FlowcoreRunResult(
-        command=cmd,
-        returncode=proc.returncode,
+        command=handle.command,
+        returncode=handle.proc.returncode,
         raw_output=output,
         clean_output=metrics["raw_text"],
         metrics=metrics,

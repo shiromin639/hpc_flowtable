@@ -12,7 +12,7 @@
 /* ============================================================
  * Cấu hình hệ thống
  * ============================================================ */
-#define NUM_MBUFS      262143 
+#define NUM_MBUFS     32768 
 #define NUM_WORKERS     4
 #define MBUF_CACHE_SIZE 250
 #define RX_DESC_PER_QUEUE 1024

@@ -22,9 +22,10 @@ def expect(condition: bool, message: str) -> None:
 
 
 def run_basic_case(name: str, rx_name: str, rules_name: str,
-        runtime_sec: float, assertions) -> tuple[bool, str]:
+        runtime_sec: float, assertions
+        ) -> tuple[bool, str]:
     assets = generate_assets()
-    with tempfile.TemporaryDirectory(prefix=f"flowcore_{name}_") as tmpdir:
+    with tempfile.TemporaryDirectory(prefix=f"flowcore_{name}_"):
         from flowcore_test_lib import run_flowcore
         result = run_flowcore(
             assets / rx_name,
@@ -69,8 +70,8 @@ def test_rule_drop_ssh():
     def assertions(result):
         expect(result.metrics["spi_forwarded"] == 5,
                f"expected 5 forwarded packets, got {result.metrics['spi_forwarded']}")
-        expect(result.metrics["spi_drops"] >= 1,
-               f"expected at least 1 SPI drop, got {result.metrics['spi_drops']}")
+        expect(result.metrics["spi_drops"] == 1,
+               f"expected 1 SPI drop, got {result.metrics['spi_drops']}")
     return run_basic_case("rule_drop_ssh", "mixed_rules_6.pcap",
             "rules_default.cfg", 2.5, assertions)
 
@@ -98,6 +99,21 @@ def test_aging_cleanup():
             "rules_default.cfg", 3.5, assertions)
 
 
+def test_non_tcp_udp_filtered():
+    def assertions(result):
+        proto = result.metrics["protocols"]
+        expect(result.metrics["created_flows"] == 0,
+               f"expected 0 created flows, got {result.metrics['created_flows']}")
+        expect(result.metrics["spi_forwarded"] == 0,
+               f"expected 0 forwarded packets, got {result.metrics['spi_forwarded']}")
+        expect(result.metrics["spi_drops"] == 0,
+               f"expected 0 SPI drops, got {result.metrics['spi_drops']}")
+        expect(all(value == 0 for value in proto.values()),
+               f"expected protocol counters to stay 0, got {proto}")
+    return run_basic_case("non_tcp_udp_filtered", "non_tcp_udp_filtered.pcap",
+            "rules_default.cfg", 2.5, assertions)
+
+
 def test_hot_reload():
     assets = generate_assets()
     with tempfile.TemporaryDirectory(prefix="flowcore_hot_reload_") as tmpdir:
@@ -105,7 +121,7 @@ def test_hot_reload():
         active_rules = tmpdir_path / "rules.cfg"
         shutil.copyfile(assets / "rules_reload_phase1.cfg", active_rules)
 
-        proc, cmd = launch_flowcore(
+        handle = launch_flowcore(
             assets / "reload_8443_loop.pcap",
             None,
             active_rules,
@@ -115,13 +131,14 @@ def test_hot_reload():
 
         time.sleep(1.5)
         shutil.copyfile(assets / "rules_reload_phase2.cfg", active_rules)
-        proc.send_signal(signal.SIGUSR1)
+        handle.proc.send_signal(signal.SIGUSR1)
         time.sleep(2.0)
 
-        output = stop_flowcore(proc)
+        output = stop_flowcore(handle)
         metrics = parse_metrics(output)
 
-        expect(proc.returncode in (0, 130), f"unexpected return code {proc.returncode}")
+        expect(handle.proc.returncode in (0, 130),
+               f"unexpected return code {handle.proc.returncode}")
         expect(metrics["reload_seen"], "expected reload message in output")
         expect(metrics["rule_version"] >= 2,
                f"expected rule version >= 2, got {metrics['rule_version']}")
@@ -144,6 +161,7 @@ def main() -> int:
         ("rule_drop_ssh", test_rule_drop_ssh),
         ("protocol_accounting", test_protocol_accounting),
         ("aging_cleanup", test_aging_cleanup),
+        ("non_tcp_udp_filtered", test_non_tcp_udp_filtered),
         ("hot_reload", test_hot_reload),
     ]
 

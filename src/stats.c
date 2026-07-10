@@ -72,6 +72,21 @@ stats_thread(__rte_unused void *arg)
         /* Report quiescent after aging iteration */
         flow_table_rcu_quiescent(lcore_id);
 
+        /*
+         * RTE_HASH_QSBR_MODE_DQ only defers deletion. The hash's internal
+         * resources are returned to the free pool only after explicit reclaim.
+         * Drain the defer queue aggressively after each aging tick so a large
+         * timeout wave does not leave tens of thousands of stale slots behind.
+         */
+        for (unsigned int reclaim_round = 0; reclaim_round < 1024;
+                reclaim_round++) {
+            unsigned int freed = 0;
+
+            if (rte_hash_rcu_qsbr_dq_reclaim(ft->hash, &freed,
+                        NULL, NULL) != 0 || freed == 0)
+                break;
+        }
+
         tick_counter++;
 
         /* Display stats every full cycle (all chunks scanned) */

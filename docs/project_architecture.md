@@ -9,11 +9,14 @@ The project is structured into `include` for headers and `src` for implementatio
 ```text
 flowtable_dpdk/
 ├── include/
+│   ├── app_init.h     # Bootstrap API for signal/install, init, run, cleanup
+│   ├── app_threads.h  # Thread entry declarations and worker arg struct
 │   ├── common.h       # System configurations, macros, and shared globals
 │   ├── flow_table.h   # Flow table structures, hot/cold data, and RCU APIs
 │   └── stats.h        # Per-lcore statistics structure and stats API
 ├── src/
-│   ├── main.c         # EAL initialization, port/ring setup, and thread launching
+│   ├── main.c         # Thin entry point: install signals, init app, run, cleanup
+│   ├── app_init.c     # EAL/port/mempool/ring bootstrap and thread launch
 │   ├── dispatcher.c   # RX thread: packet parsing, hash lookup, and distribution
 │   ├── worker.c       # TX thread: dequeuing packets and transmitting
 │   ├── flow_table.c   # Lock-free hash initialization, RCU setup, and chunked aging
