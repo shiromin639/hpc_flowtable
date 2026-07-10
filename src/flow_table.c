@@ -1,14 +1,7 @@
-/*
- * flow_table.c - Flow Table with RCU + Hot/Cold split + Chunked Aging
- *
- * Concurrency: rte_hash (lock-free) + rte_rcu_qsbr
- * Data layout: hot_data[] (64B aligned) + cold_data[] (64B aligned)
- * Aging: chunked iteration + batch delete
- */
-
 #include "flow_table.h"
 #include "common.h"
 #include <rte_hash.h>
+#include <rte_jhash.h>
 #include <rte_hash_crc.h>
 #include <rte_rcu_qsbr.h>
 #include <rte_cycles.h>
@@ -24,10 +17,6 @@ flow_table_init(int socket_id)
 {
     memset(&g_ft_ctx, 0, sizeof(g_ft_ctx));
 
-    /*
-     * Lock-free hash: RW_CONCURRENCY_LF uses CAS instead of spinlock.
-     * CRC32 hardware hash (~5 cycles) vs jhash software (~15 cycles).
-     */
     struct rte_hash_parameters hash_params = {
         .name = "flow_table_lf",
         .entries = HASH_ENTRIES,
@@ -52,7 +41,6 @@ flow_table_init(int socket_id)
     }
     g_ft_ctx.storage_entries = (uint32_t)max_key_id + 1;
 
-    /* Allocate hot/cold arrays sized to the hash key-id range. */
     g_ft_ctx.hot = rte_zmalloc_socket("flow_hot",
             sizeof(struct flow_hot_data) * g_ft_ctx.storage_entries,
             RTE_CACHE_LINE_SIZE, socket_id);
@@ -72,11 +60,6 @@ flow_table_init(int socket_id)
         return -1;
     }
 
-    /*
-     * RCU QSBR setup: each reader thread reports quiescent state
-     * after each burst. Writer (aging) can only reclaim entries
-     * after ALL readers have gone quiescent.
-     */
     size_t qsv_sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
     g_ft_ctx.qsv = rte_zmalloc_socket("rcu_qsbr", qsv_sz,
             RTE_CACHE_LINE_SIZE, socket_id);
@@ -93,11 +76,6 @@ flow_table_init(int socket_id)
         goto fail_qsv;
     }
 
-    /*
-     * Attach RCU to rte_hash: after this, del_key() defers reclamation
-     * until all readers report quiescent state.
-     * DQ mode = hash manages its own deferred queue internally.
-     */
     struct rte_hash_rcu_config rcu_cfg = {
         .v = g_ft_ctx.qsv,
         .mode = RTE_HASH_QSBR_MODE_DQ,
@@ -149,13 +127,6 @@ flow_table_rcu_quiescent(unsigned int thread_id)
     rte_rcu_qsbr_quiescent(g_ft_ctx.qsv, thread_id);
 }
 
-/*
- * Chunked aging: scan 1/AGING_NUM_CHUNKS of the table per tick.
- *
- * Instead of scanning all 1M entries every second (latency spike),
- * we divide into 8 chunks, scan 1 chunk every 125ms.
- * Expired keys are collected into a batch buffer, then deleted together.
- */
 uint32_t
 flow_table_aging_tick(void)
 {
@@ -175,7 +146,6 @@ flow_table_aging_tick(void)
     while ((position = rte_hash_iterate(g_ft_ctx.hash,
                     &next_key, &next_data, &iter)) >= 0) {
 
-        /* Only process entries belonging to current chunk */
         if (((uint32_t)position % AGING_NUM_CHUNKS) != chunk)
             continue;
 
@@ -199,7 +169,6 @@ flow_table_aging_tick(void)
         }
     }
 
-    /* Flush remaining */
     for (uint32_t i = 0; i < expired_count; i++) {
         int ret = rte_hash_del_key(g_ft_ctx.hash, expired_keys[i]);
         if (likely(ret >= 0))

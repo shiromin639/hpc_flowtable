@@ -3,14 +3,6 @@
 
 #include "common.h"
 
-/*
- * Per-lcore statistics.
- *
- * __rte_cache_aligned đảm bảo mỗi lcore_stats chiếm cache line riêng.
- * Nếu không align, 2 lcores' stats có thể nằm chung cache line
- * → false sharing: core A update rx_pkts invalidate cache của core B
- * đang update tx_pkts → thrashing.
- */
 struct lcore_stats {
     uint64_t rx_pkts;
     uint64_t rx_bytes;
@@ -30,9 +22,8 @@ struct lcore_stats {
     uint64_t other_pkts;
 } __rte_cache_aligned;
 
-extern struct lcore_stats port_stats[RTE_MAX_LCORE];
+extern struct lcore_stats lcore_stats[RTE_MAX_LCORE];
 
-/* Thread functions */
 int stats_thread(void *arg);
 
 #endif /* STATS_H */

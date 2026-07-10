@@ -1,11 +1,3 @@
-/*
- * stats.c - Statistics display + Chunked flow aging
- *
- * Aging runs at AGING_INTERVAL_US (125ms) intervals.
- * Each tick scans 1/8 of the hash table and batch-deletes expired flows.
- * Stats display updates every 1 second (every 8 aging ticks).
- */
-
 #include "flow_table.h"
 #include "spi_engine.h"
 #include "stats.h"
@@ -17,8 +9,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 
-/* Defined here, declared extern in stats.h */
-struct lcore_stats port_stats[RTE_MAX_LCORE];
+struct lcore_stats lcore_stats[RTE_MAX_LCORE];
 
 int
 stats_thread(__rte_unused void *arg)
@@ -38,25 +29,11 @@ stats_thread(__rte_unused void *arg)
     struct flow_table_ctx *ft = flow_table_get_ctx();
     unsigned int lcore_id = rte_lcore_id();
 
-    /*
-     * Register as RCU reader: even though stats thread is primarily
-     * a writer (aging deletes), it also iterates (reads) the hash table.
-     * RCU requires all threads touching the hash to be registered.
-     */
     flow_table_rcu_register(lcore_id);
 
     printf("Stats/Aging thread on lcore %u (RCU registered)\n", lcore_id);
     printf("\033[2J");
 
-    /*
-     * tick_counter: counts aging ticks.
-     * Display stats every AGING_NUM_CHUNKS ticks (= 1 second).
-     * Example with 8 chunks, 125ms interval:
-     *   tick 0: scan chunk 0 (125ms)
-     *   tick 1: scan chunk 1 (250ms)
-     *   ...
-     *   tick 7: scan chunk 7 + DISPLAY STATS (1000ms)
-     */
     uint32_t tick_counter = 0;
     uint64_t total_aged_this_cycle = 0;
 
@@ -65,19 +42,11 @@ stats_thread(__rte_unused void *arg)
 
         spi_rule_engine_reload_if_needed();
 
-        /* Run 1 aging tick: scan 1 chunk, batch delete expired */
         uint32_t aged = flow_table_aging_tick();
         total_aged_this_cycle += aged;
 
-        /* Report quiescent after aging iteration */
         flow_table_rcu_quiescent(lcore_id);
 
-        /*
-         * RTE_HASH_QSBR_MODE_DQ only defers deletion. The hash's internal
-         * resources are returned to the free pool only after explicit reclaim.
-         * Drain the defer queue aggressively after each aging tick so a large
-         * timeout wave does not leave tens of thousands of stale slots behind.
-         */
         for (unsigned int reclaim_round = 0; reclaim_round < 1024;
                 reclaim_round++) {
             unsigned int freed = 0;
@@ -89,16 +58,13 @@ stats_thread(__rte_unused void *arg)
 
         tick_counter++;
 
-        /* Display stats every full cycle (all chunks scanned) */
         if (tick_counter < AGING_NUM_CHUNKS)
             continue;
 
-        /* Record aged flows */
-        port_stats[lcore_id].flows_deleted += total_aged_this_cycle;
+        lcore_stats[lcore_id].flows_deleted += total_aged_this_cycle;
         total_aged_this_cycle = 0;
         tick_counter = 0;
 
-        /* Aggregate stats across all lcores */
         uint64_t total_rx_pkts = 0, total_tx_pkts = 0;
         uint64_t total_rx_bytes = 0, total_tx_bytes = 0;
         uint64_t total_flows_created = 0, total_flows_deleted = 0;
@@ -109,22 +75,22 @@ stats_thread(__rte_unused void *arg)
 
         unsigned int lid;
         RTE_LCORE_FOREACH(lid) {
-            total_rx_pkts  += port_stats[lid].rx_pkts;
-            total_tx_pkts  += port_stats[lid].tx_pkts;
-            total_rx_bytes += port_stats[lid].rx_bytes;
-            total_tx_bytes += port_stats[lid].tx_bytes;
-            total_flows_created += port_stats[lid].flows_created;
-            total_flows_deleted += port_stats[lid].flows_deleted;
-            total_spi_drops += port_stats[lid].spi_pkts_dropped;
-            total_tx_drops += port_stats[lid].tx_drop_pkts;
-            total_spi_forwarded += port_stats[lid].spi_pkts_forwarded;
-            total_revalidations += port_stats[lid].spi_rule_revalidations;
-            total_http += port_stats[lid].http_pkts;
-            total_https += port_stats[lid].https_pkts;
-            total_dns += port_stats[lid].dns_pkts;
-            total_tcp += port_stats[lid].tcp_pkts;
-            total_udp += port_stats[lid].udp_pkts;
-            total_other += port_stats[lid].other_pkts;
+            total_rx_pkts  += lcore_stats[lid].rx_pkts;
+            total_tx_pkts  += lcore_stats[lid].tx_pkts;
+            total_rx_bytes += lcore_stats[lid].rx_bytes;
+            total_tx_bytes += lcore_stats[lid].tx_bytes;
+            total_flows_created += lcore_stats[lid].flows_created;
+            total_flows_deleted += lcore_stats[lid].flows_deleted;
+            total_spi_drops += lcore_stats[lid].spi_pkts_dropped;
+            total_tx_drops += lcore_stats[lid].tx_drop_pkts;
+            total_spi_forwarded += lcore_stats[lid].spi_pkts_forwarded;
+            total_revalidations += lcore_stats[lid].spi_rule_revalidations;
+            total_http += lcore_stats[lid].http_pkts;
+            total_https += lcore_stats[lid].https_pkts;
+            total_dns += lcore_stats[lid].dns_pkts;
+            total_tcp += lcore_stats[lid].tcp_pkts;
+            total_udp += lcore_stats[lid].udp_pkts;
+            total_other += lcore_stats[lid].other_pkts;
         }
 
         uint64_t pps_rx  = total_rx_pkts  - prev_rx_pkts;
@@ -166,14 +132,13 @@ stats_thread(__rte_unused void *arg)
 
         for (int w = 0; w < NUM_WORKERS; w++) {
             unsigned int wl = worker_lcore_ids[w];
-            uint64_t w_tx_pkts  = port_stats[wl].tx_pkts;
-            uint64_t w_tx_bytes = port_stats[wl].tx_bytes;
-            uint64_t w_spi_drops = port_stats[wl].spi_pkts_dropped;
-            uint64_t w_tx_drops = port_stats[wl].tx_drop_pkts;
-            uint64_t w_revalidations = port_stats[wl].spi_rule_revalidations;
+            uint64_t w_tx_pkts  = lcore_stats[wl].tx_pkts;
+            uint64_t w_tx_bytes = lcore_stats[wl].tx_bytes;
+            uint64_t w_spi_drops = lcore_stats[wl].spi_pkts_dropped;
+            uint64_t w_tx_drops = lcore_stats[wl].tx_drop_pkts;
+            uint64_t w_revalidations = lcore_stats[wl].spi_rule_revalidations;
             uint64_t w_pps = w_tx_pkts  - prev_worker_tx_pkts[w];
-            uint64_t w_mbps = ((w_tx_bytes - prev_worker_tx_bytes[w]) * 8)
-                              / 1000000;
+            uint64_t w_mbps = ((w_tx_bytes - prev_worker_tx_bytes[w]) * 8) / 1000000;
             uint64_t w_spi_drop_ps = w_spi_drops - prev_worker_spi_drops[w];
             uint64_t w_tx_drop_ps = w_tx_drops - prev_worker_tx_drops[w];
             uint64_t w_recheck_ps =
@@ -185,12 +150,12 @@ stats_thread(__rte_unused void *arg)
                    w_recheck_ps);
             printf("  HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64
                    " TCP=%"PRIu64" UDP=%"PRIu64" OTHER=%"PRIu64"\n",
-                   port_stats[wl].http_pkts,
-                   port_stats[wl].https_pkts,
-                   port_stats[wl].dns_pkts,
-                   port_stats[wl].tcp_pkts,
-                   port_stats[wl].udp_pkts,
-                   port_stats[wl].other_pkts);
+                   lcore_stats[wl].http_pkts,
+                   lcore_stats[wl].https_pkts,
+                   lcore_stats[wl].dns_pkts,
+                   lcore_stats[wl].tcp_pkts,
+                   lcore_stats[wl].udp_pkts,
+                   lcore_stats[wl].other_pkts);
 
             prev_worker_tx_pkts[w]  = w_tx_pkts;
             prev_worker_tx_bytes[w] = w_tx_bytes;

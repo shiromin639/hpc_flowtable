@@ -89,7 +89,7 @@ worker_thread(void *arg)
     uint16_t nb_rx, nb_tx;
     unsigned int lcore_id = rte_lcore_id();
     struct flow_table_ctx *ft = flow_table_get_ctx();
-    struct lcore_stats *stats = &port_stats[lcore_id];
+    struct lcore_stats *stats = &lcore_stats[lcore_id];
 
     printf("Worker %u running on lcore %u\n", worker_id, lcore_id);
 

@@ -1,13 +1,3 @@
-/*
- * dispatcher.c - Packet dispatcher with RCU lock-free flow lookup
- *
- * Hot path: lookup_bulk() -> read worker_id -> update last_seen -> enqueue
- * Cold path (unlikely): add_key() for new flows
- *
- * RCU: dispatcher is a READER. Calls quiescent() after each burst
- * to allow aging thread to reclaim deleted entries safely.
- */
-
 #include "flow_table.h"
 #include "spi_engine.h"
 #include "stats.h"
@@ -40,7 +30,7 @@ dispatcher_thread(__rte_unused void *arg)
     unsigned int lcore_id = rte_lcore_id();
     struct flow_table_ctx *ft = flow_table_get_ctx();
 
-    /* Register this thread as RCU reader */
+    // Register this thread as RCU reader 
     flow_table_rcu_register(lcore_id);
 
     printf("Dispatcher running on lcore %u (RCU registered)\n", lcore_id);
@@ -51,20 +41,14 @@ dispatcher_thread(__rte_unused void *arg)
         const uint16_t nb_rx = rte_eth_rx_burst(PORT_IN, 0,
                 pkts_burst, BURST_SIZE);
         if (unlikely(nb_rx == 0)) {
-            /*
-             * CRITICAL: Must report quiescent even when no packets!
-             * Without this, when traffic stops, RCU thinks this reader
-             * is still holding references → aging can never reclaim
-             * deleted entries → flows never actually disappear.
-             */
             flow_table_rcu_quiescent(lcore_id);
             continue;
         }
 
-        port_stats[lcore_id].rx_pkts += nb_rx;
+        lcore_stats[lcore_id].rx_pkts += nb_rx;
         uint64_t current_tsc = rte_rdtsc();
 
-        /* Phase 1: Extract 5-tuple keys from valid IPv4/TCP/UDP packets */
+        // Extract 5-tuple keys from valid IPv4/TCP/UDP packets 
         uint16_t valid_pkts = 0;
         struct rte_mbuf *valid_mbufs[BURST_SIZE];
 
@@ -73,19 +57,16 @@ dispatcher_thread(__rte_unused void *arg)
             //     rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i + 3], void *));
             // }
             struct rte_mbuf *m = pkts_burst[i];
-            port_stats[lcore_id].rx_bytes += m->pkt_len;
+            lcore_stats[lcore_id].rx_bytes += m->pkt_len;
 
-            struct rte_ether_hdr *eth_hdr =
-                rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+            struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-            if (unlikely(eth_hdr->ether_type !=
-                         rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))) {
+            if (unlikely(eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))) {
                 rte_pktmbuf_free(m);
                 continue;
             }
 
-            struct rte_ipv4_hdr *ipv4_hdr =
-                (struct rte_ipv4_hdr *)(eth_hdr + 1);
+            struct rte_ipv4_hdr *ipv4_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
             uint8_t l3_len = rte_ipv4_hdr_len(ipv4_hdr);
 
             if (unlikely(ipv4_hdr->next_proto_id != IPPROTO_TCP &&
@@ -95,8 +76,7 @@ dispatcher_thread(__rte_unused void *arg)
             }
 
             if (unlikely(l3_len < sizeof(struct rte_ipv4_hdr) ||
-                         rte_pktmbuf_data_len(m) <
-                         sizeof(*eth_hdr) + l3_len + sizeof(uint16_t) * 2)) {
+                         rte_pktmbuf_data_len(m) < sizeof(*eth_hdr) + l3_len + sizeof(uint16_t) * 2)) {
                 rte_pktmbuf_free(m);
                 continue;
             }
@@ -107,8 +87,7 @@ dispatcher_thread(__rte_unused void *arg)
             keys[valid_pkts].ip_dst  = ipv4_hdr->dst_addr;
             keys[valid_pkts].proto   = ipv4_hdr->next_proto_id;
 
-            uint16_t *ports = (uint16_t *)
-                ((unsigned char *)ipv4_hdr + l3_len);
+            uint16_t *ports = (uint16_t *)((unsigned char *)ipv4_hdr + l3_len);
             keys[valid_pkts].port_src = ports[0];
             keys[valid_pkts].port_dst = ports[1];
 
@@ -118,14 +97,7 @@ dispatcher_thread(__rte_unused void *arg)
 
         if (likely(valid_pkts > 0)) {
             uint16_t resolved_count = 0;
-
-            /*
-             * Batch lookup: lock-free, NEVER blocks.
-             * With RW_CONCURRENCY_LF, this is a pure read operation
-             * using memory barriers, no locks at all.
-             */
-            rte_hash_lookup_bulk(ft->hash, key_ptrs,
-                    valid_pkts, positions);
+            rte_hash_lookup_bulk(ft->hash, key_ptrs, valid_pkts, positions);
 
             for (int i = 0; i < valid_pkts; i++) {
                 struct rte_mbuf *m = valid_mbufs[i];
@@ -134,8 +106,7 @@ dispatcher_thread(__rte_unused void *arg)
                 int duplicate_idx = -1;
 
                 for (uint16_t j = 0; j < resolved_count; j++) {
-                    if (memcmp(&keys[i], &keys[resolved_indices[j]],
-                               sizeof(keys[i])) == 0) {
+                    if (memcmp(&keys[i], &keys[resolved_indices[j]], sizeof(keys[i])) == 0) {
                         duplicate_idx = j;
                         break;
                     }
@@ -148,8 +119,7 @@ dispatcher_thread(__rte_unused void *arg)
 
                     m->hash.fdir.lo = (uint32_t)flow_idx;
                     m->hash.fdir.hi = ft->hot[flow_idx].flow_gen;
-                    worker_buffers[target_worker]
-                        [worker_counts[target_worker]++] = m;
+                    worker_buffers[target_worker][worker_counts[target_worker]++] = m;
                     continue;
                 }
 
@@ -159,13 +129,11 @@ dispatcher_thread(__rte_unused void *arg)
                     flow_idx = rte_hash_add_key(ft->hash, key_ptrs[i]);
 
                     if (likely(flow_idx >= 0)) {
-                        if (unlikely((uint32_t)flow_idx >=
-                                     ft->storage_entries)) {
+                        if (unlikely((uint32_t)flow_idx >= ft->storage_entries)) {
                             rte_pktmbuf_free(m);
                             continue;
                         }
 
-                        /* Fresh slot allocation. */
                         ft->cold[flow_idx].src_ip   = keys[i].ip_src;
                         ft->cold[flow_idx].dst_ip   = keys[i].ip_dst;
                         ft->cold[flow_idx].src_port = keys[i].port_src;
@@ -173,8 +141,7 @@ dispatcher_thread(__rte_unused void *arg)
                         ft->cold[flow_idx].protocol = keys[i].proto;
                         ft->cold[flow_idx].create_time = current_tsc;
 
-                        hash_sig_t hash_val =
-                            rte_hash_hash(ft->hash, key_ptrs[i]);
+                        hash_sig_t hash_val = rte_hash_hash(ft->hash, key_ptrs[i]);
                         target_worker = hash_val % NUM_WORKERS;
 
                         ft->hot[flow_idx].flow_gen++;
@@ -184,7 +151,7 @@ dispatcher_thread(__rte_unused void *arg)
                         ft->hot[flow_idx].spi_action = SPI_ACTION_UNKNOWN;
                         ft->hot[flow_idx].action_version = 0;
                         ft->hot[flow_idx].last_seen = current_tsc;
-                        port_stats[lcore_id].flows_created++;
+                        lcore_stats[lcore_id].flows_created++;
                     } else {
                         rte_pktmbuf_free(m);
                         continue;
@@ -194,11 +161,6 @@ dispatcher_thread(__rte_unused void *arg)
                         rte_pktmbuf_free(m);
                         continue;
                     }
-                    /*
-                     * Existing flow: HOT PATH.
-                     * Only touches the compact hot_data entry.
-                     * cold_data stays untouched on the steady-state path.
-                     */
                     target_worker = ft->hot[flow_idx].worker_id;
                     ft->hot[flow_idx].last_seen = current_tsc;
                 }
@@ -210,11 +172,9 @@ dispatcher_thread(__rte_unused void *arg)
 
                 m->hash.fdir.lo = (uint32_t)flow_idx;
                 m->hash.fdir.hi = ft->hot[flow_idx].flow_gen;
-                worker_buffers[target_worker]
-                    [worker_counts[target_worker]++] = m;
+                worker_buffers[target_worker][worker_counts[target_worker]++] = m;
             }
 
-            /* Enqueue packets to worker rings */
             for (int w = 0; w < NUM_WORKERS; w++) {
                 if (worker_counts[w] > 0) {
                     uint16_t sent = rte_ring_enqueue_burst(
@@ -229,13 +189,6 @@ dispatcher_thread(__rte_unused void *arg)
             }
         }
 
-        /*
-         * RCU Quiescent: "I'm done with this burst, no longer
-         * holding references to any hash table entries."
-         * This allows aging thread to safely reclaim deleted entries.
-         *
-         * Cost: ~1 atomic store. Negligible overhead.
-         */
         flow_table_rcu_quiescent(lcore_id);
     }
     return 0;
