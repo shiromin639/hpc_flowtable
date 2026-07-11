@@ -9,7 +9,7 @@
 #include <rte_mempool.h>
 #include <stdint.h>
 
-#define NUM_MBUFS   100000 
+#define NUM_MBUFS   500000 
 #define NUM_WORKERS     4
 #define MBUF_CACHE_SIZE 250
 #define RX_DESC_PER_QUEUE 1024
