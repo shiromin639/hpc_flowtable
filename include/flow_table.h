@@ -57,6 +57,23 @@ flow_hot_last_seen_store(struct flow_hot_data *hot, uint64_t tsc)
     __atomic_store_n(&hot->last_seen, tsc, __ATOMIC_RELAXED);
 }
 
+static inline uint32_t
+flow_hot_generation_load(const struct flow_hot_data *hot)
+{
+    return __atomic_load_n(&hot->flow_gen, __ATOMIC_ACQUIRE);
+}
+
+static inline uint32_t
+flow_hot_generation_next(struct flow_hot_data *hot)
+{
+    uint32_t gen = __atomic_add_fetch(&hot->flow_gen, 1, __ATOMIC_SEQ_CST);
+
+    if (unlikely(gen == 0))
+        gen = __atomic_add_fetch(&hot->flow_gen, 1, __ATOMIC_SEQ_CST);
+
+    return gen;
+}
+
 int flow_table_init(int socket_id);
 void flow_table_destroy(void);
 void flow_table_rcu_register(unsigned int thread_id);

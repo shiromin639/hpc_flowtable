@@ -26,6 +26,7 @@ dispatcher_thread(__rte_unused void *arg)
     uint16_t resolved_indices[BURST_SIZE];
     int32_t resolved_positions[BURST_SIZE];
     uint32_t resolved_workers[BURST_SIZE];
+    uint32_t resolved_generations[BURST_SIZE];
 
     unsigned int lcore_id = rte_lcore_id();
     struct flow_table_ctx *ft = flow_table_get_ctx();
@@ -38,8 +39,7 @@ dispatcher_thread(__rte_unused void *arg)
     while (!force_quit) {
         memset(worker_counts, 0, sizeof(worker_counts));
 
-        const uint16_t nb_rx = rte_eth_rx_burst(PORT_IN, 0,
-                pkts_burst, BURST_SIZE);
+        const uint16_t nb_rx = rte_eth_rx_burst(PORT_IN, 0, pkts_burst, BURST_SIZE);
         if (unlikely(nb_rx == 0)) {
             flow_table_rcu_quiescent(lcore_id);
             continue;
@@ -103,6 +103,7 @@ dispatcher_thread(__rte_unused void *arg)
                 struct rte_mbuf *m = valid_mbufs[i];
                 int flow_idx = positions[i];
                 uint32_t target_worker;
+                uint32_t flow_gen;
                 int duplicate_idx = -1;
 
                 for (uint16_t j = 0; j < resolved_count; j++) {
@@ -115,10 +116,11 @@ dispatcher_thread(__rte_unused void *arg)
                 if (unlikely(duplicate_idx >= 0)) {
                     flow_idx = resolved_positions[duplicate_idx];
                     target_worker = resolved_workers[duplicate_idx];
+                    flow_gen = resolved_generations[duplicate_idx];
                     flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
 
                     m->hash.fdir.lo = (uint32_t)flow_idx;
-                    m->hash.fdir.hi = ft->hot[flow_idx].flow_gen;
+                    m->hash.fdir.hi = flow_gen;
                     worker_buffers[target_worker][worker_counts[target_worker]++] = m;
                     continue;
                 }
@@ -135,9 +137,11 @@ dispatcher_thread(__rte_unused void *arg)
                         }
 
                         /*
-                         * Publish activity timestamp immediately so aging
-                         * does not observe a freshly added flow as stale.
+                         * Invalidate any queued mbuf metadata for an older
+                         * occupant before replacing the side-array contents.
                          */
+                        flow_gen = flow_hot_generation_next(&ft->hot[flow_idx]);
+
                         flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
 
                         ft->cold[flow_idx].src_ip   = keys[i].ip_src;
@@ -150,9 +154,6 @@ dispatcher_thread(__rte_unused void *arg)
                         hash_sig_t hash_val = rte_hash_hash(ft->hash, key_ptrs[i]);
                         target_worker = hash_val % NUM_WORKERS;
 
-                        ft->hot[flow_idx].flow_gen++;
-                        if (ft->hot[flow_idx].flow_gen == 0)
-                            ft->hot[flow_idx].flow_gen = 1;
                         ft->hot[flow_idx].worker_id = target_worker;
                         ft->hot[flow_idx].spi_action = SPI_ACTION_UNKNOWN;
                         ft->hot[flow_idx].action_version = 0;
@@ -167,16 +168,18 @@ dispatcher_thread(__rte_unused void *arg)
                         continue;
                     }
                     target_worker = ft->hot[flow_idx].worker_id;
+                    flow_gen = flow_hot_generation_load(&ft->hot[flow_idx]);
                     flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
                 }
 
                 resolved_indices[resolved_count] = i;
                 resolved_positions[resolved_count] = flow_idx;
                 resolved_workers[resolved_count] = target_worker;
+                resolved_generations[resolved_count] = flow_gen;
                 resolved_count++;
 
                 m->hash.fdir.lo = (uint32_t)flow_idx;
-                m->hash.fdir.hi = ft->hot[flow_idx].flow_gen;
+                m->hash.fdir.hi = flow_gen;
                 worker_buffers[target_worker][worker_counts[target_worker]++] = m;
             }
 

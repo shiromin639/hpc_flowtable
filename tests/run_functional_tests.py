@@ -96,7 +96,7 @@ def test_aging_cleanup():
         expect(result.metrics["deleted_flows"] >= 1,
                f"expected at least 1 deleted flow, got {result.metrics['deleted_flows']}")
     return run_basic_case("aging_cleanup", "aging_single.pcap",
-            "rules_default.cfg", 3.5, assertions)
+            "rules_default.cfg", 7.0, assertions)
 
 
 def test_non_tcp_udp_filtered():

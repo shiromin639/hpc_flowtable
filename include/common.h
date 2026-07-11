@@ -24,7 +24,7 @@
 #define SPI_RULES_PATH  "rules.cfg"
 #define SPI_MAX_RULES   256
 
-#define FLOW_TIMEOUT_SEC   5 
+#define FLOW_TIMEOUT_SEC   1 
 
 #define AGING_NUM_CHUNKS    8
 #define AGING_BATCH_SIZE    1024

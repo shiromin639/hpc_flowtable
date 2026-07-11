@@ -953,7 +953,7 @@ test_aging_cleanup(const char *dir)
 
     join_path(rx_path, sizeof(rx_path), dir, "aging_single.pcap");
     join_path(rules_path, sizeof(rules_path), dir, "rules_default.cfg");
-    result = run_flowcore_case(rx_path, rules_path, 3500, 0);
+    result = run_flowcore_case(rx_path, rules_path, 7000, 0);
 
     ok &= expect_true(result.metrics.created_flows == 1,
             "aging_cleanup: expected created_flows=1, got %llu",

@@ -40,3 +40,12 @@ functional_test_exe = executable('flowcore_functional_tests',
 )
 
 test('flowcore-functional', functional_test_exe)
+
+flow_slot_lifecycle_test_exe = executable('flow_slot_lifecycle_tests',
+    'tests/flow_slot_lifecycle_tests.c',
+    include_directories : inc,
+    dependencies : dpdk_dep,
+    install : false
+)
+
+test('flow-slot-lifecycle', flow_slot_lifecycle_test_exe)

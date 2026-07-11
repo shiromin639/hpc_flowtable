@@ -110,7 +110,7 @@ worker_thread(void *arg)
             uint8_t action;
 
             if (likely(flow_idx < ft->storage_entries &&
-                       ft->hot[flow_idx].flow_gen == flow_gen)) {
+                       flow_hot_generation_load(&ft->hot[flow_idx]) == flow_gen)) {
                 cold = &ft->cold[flow_idx];
                 if (unlikely(ft->hot[flow_idx].action_version !=
                              active_rule_version))
