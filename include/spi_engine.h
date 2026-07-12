@@ -35,7 +35,6 @@ void spi_rule_engine_request_reload(void);
 int spi_rule_engine_reload_if_needed(void);
 uint32_t spi_rule_engine_version(void);
 uint32_t spi_rule_engine_rule_count(void);
-uint8_t spi_rule_engine_eval(struct flow_table_ctx *ft, uint32_t flow_idx);
 uint8_t spi_rule_engine_match_cold(const struct flow_cold_data *cold);
 
 #endif /* SPI_ENGINE_H */

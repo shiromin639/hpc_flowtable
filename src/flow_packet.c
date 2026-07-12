@@ -31,6 +31,10 @@ flow_packet_extract_key(const void *data, uint32_t data_len,
     if (l3_len < sizeof(*ipv4_hdr))
         return FLOW_PACKET_PARSE_TRUNCATED;
 
+    if ((rte_be_to_cpu_16(ipv4_hdr->fragment_offset) &
+                (RTE_IPV4_HDR_MF_FLAG | RTE_IPV4_HDR_OFFSET_MASK)) != 0)
+        return FLOW_PACKET_PARSE_UNSUPPORTED;
+
     if (ipv4_hdr->next_proto_id != IPPROTO_TCP &&
         ipv4_hdr->next_proto_id != IPPROTO_UDP)
         return FLOW_PACKET_PARSE_UNSUPPORTED;

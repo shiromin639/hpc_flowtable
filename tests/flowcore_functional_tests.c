@@ -663,7 +663,7 @@ parse_metrics(const char *clean_output, struct metrics *metrics)
             metrics->created_flows = value;
             continue;
         }
-        if (sscanf(line, "Deleted/Timeout: %llu Flows", &value) == 1) {
+        if (sscanf(line, "Deleted Flows : %llu Flows", &value) == 1) {
             metrics->deleted_flows = value;
             continue;
         }
@@ -686,7 +686,7 @@ parse_metrics(const char *clean_output, struct metrics *metrics)
         if (sscanf(line, "Active Rules  : %llu Rules | %llu Version",
                    &metrics->active_rules, &metrics->rule_version) == 2)
             continue;
-        if (sscanf(line, "SPI Forwarded : %llu Pkts | %llu Rechecks",
+        if (sscanf(line, "SPI Forwarded : %llu Pkts | %llu Rule Matches",
                    &metrics->spi_forwarded, &metrics->rechecks) == 2)
             continue;
         if (sscanf(line,

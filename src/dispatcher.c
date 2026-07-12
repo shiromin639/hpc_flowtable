@@ -1,6 +1,5 @@
 #include "flow_table.h"
 #include "flow_packet.h"
-#include "spi_engine.h"
 #include "stats.h"
 #include "common.h"
 
@@ -10,6 +9,32 @@
 #include <rte_mbuf.h>
 #include <rte_lcore.h>
 #include <string.h>
+
+static int
+dispatcher_evict_for_replacement(struct lcore_stats *stats,
+        unsigned int lcore_id)
+{
+    int evicted;
+
+    stats->replacement_attempts++;
+    if (flow_table_victim_cache_count() == 0)
+        stats->victim_cache_empty++;
+
+    evicted = flow_table_evict_for_replacement(FLOW_REPLACEMENT_RETRIES,
+            FLOW_EMERGENCY_SCAN_BUDGET);
+    if (evicted > 0) {
+        stats->replacement_success++;
+        stats->victim_evicted_flows++;
+        stats->flows_deleted++;
+        flow_table_rcu_quiescent(lcore_id);
+        stats->aging_reclaimed += flow_table_reclaim(
+                FLOW_RECLAIM_REPLACEMENT_BUDGET);
+        return 1;
+    }
+
+    stats->replacement_failures++;
+    return 0;
+}
 
 int
 dispatcher_thread(__rte_unused void *arg)
@@ -108,6 +133,20 @@ dispatcher_thread(__rte_unused void *arg)
                      * Lock-free add uses CAS internally. */
                     flow_idx = rte_hash_add_key(ft->hash, key_ptrs[i]);
 
+                    if (unlikely(flow_idx < 0)) {
+                        stats->hash_add_failures++;
+                        if (dispatcher_evict_for_replacement(stats,
+                                    lcore_id)) {
+                            flow_idx = rte_hash_add_key(ft->hash,
+                                    key_ptrs[i]);
+                            if (likely(flow_idx >= 0)) {
+                                stats->flow_add_retry_success++;
+                            } else {
+                                stats->flow_add_retry_failures++;
+                            }
+                        }
+                    }
+
                     if (likely(flow_idx >= 0)) {
                         if (unlikely((uint32_t)flow_idx >= ft->storage_entries)) {
                             stats->hash_add_failures++;
@@ -121,8 +160,6 @@ dispatcher_thread(__rte_unused void *arg)
                          */
                         flow_gen = flow_hot_generation_next(&ft->hot[flow_idx]);
 
-                        flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
-
                         flow_cold_from_key(&ft->cold[flow_idx], &keys[i],
                                 current_tsc);
 
@@ -130,11 +167,10 @@ dispatcher_thread(__rte_unused void *arg)
                         target_worker = hash_val % NUM_WORKERS;
 
                         ft->hot[flow_idx].worker_id = target_worker;
-                        ft->hot[flow_idx].spi_action = SPI_ACTION_UNKNOWN;
-                        ft->hot[flow_idx].action_version = 0;
+                        flow_hot_last_seen_store(&ft->hot[flow_idx],
+                                current_tsc);
                         stats->flows_created++;
                     } else {
-                        stats->hash_add_failures++;
                         rte_pktmbuf_free(m);
                         continue;
                     }

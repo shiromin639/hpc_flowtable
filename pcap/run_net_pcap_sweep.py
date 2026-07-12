@@ -122,7 +122,7 @@ def run_one(flow_count: int) -> SweepResult:
         last_nonzero_tx_pps=tx_series[-1] if tx_series else 0,
         active_flows=last_int(r"Active Flows\s*:\s*(\d+)", clean),
         created_flows=last_int(r"Created Flows\s*:\s*(\d+)", clean),
-        deleted_flows=last_int(r"Deleted/Timeout:\s*(\d+)", clean),
+        deleted_flows=last_int(r"Deleted Flows\s*:\s*(\d+)", clean),
         spi_drops=last_int(r"SPI Drops\s*:\s*(\d+)", clean),
         tx_drops=last_int(r"TX Drops\s*:\s*(\d+)", clean),
         runtime_sec=runtime_sec,

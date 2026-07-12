@@ -62,3 +62,15 @@ flow_slot_lifecycle_test_exe = executable('flow_slot_lifecycle_tests',
 )
 
 test('flow-slot-lifecycle', flow_slot_lifecycle_test_exe)
+
+flow_table_overload_test_exe = executable('flow_table_overload_tests',
+    'tests/flow_table_overload_tests.c',
+    'src/flow_table.c',
+    c_args : ['-DHASH_ENTRIES=64'],
+    include_directories : inc,
+    dependencies : dpdk_dep,
+    install : false
+)
+
+test('flow-table-overload', flow_table_overload_test_exe,
+    is_parallel : false)

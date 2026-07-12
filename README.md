@@ -30,7 +30,7 @@ Flow table dùng `rte_hash` để map từ `5-tuple key -> flow_idx`. Hash table
 - `hot[flow_idx]`
 - `cold[flow_idx]`
 
-`hot data` chứa các field hay đụng trên datapath như `last_seen`, `flow_gen`, `worker_id`, `spi_action`, `action_version`. `cold data` chứa các field mô tả flow như `src/dst ip`, `src/dst port`, `protocol`, `create_time`. Ý tưởng là dispatcher và aging chủ yếu đụng `hot`, còn worker/SPI mới cần `cold`. `flow_gen` được dùng để phát hiện trường hợp `flow_idx` cũ đã bị reuse cho flow khác.
+`hot data` chứa các field hay đụng trên datapath như `last_seen`, `flow_gen`, `worker_id`. `cold data` chứa các field mô tả flow như `src/dst ip`, `src/dst port`, `protocol`, `create_time`. Ý tưởng là dispatcher và aging chủ yếu đụng `hot`, còn worker/SPI mới cần `cold`. `flow_gen` được dùng để phát hiện trường hợp `flow_idx` cũ đã bị reuse cho flow khác; worker copy `cold data` thành snapshot trước khi match SPI để tránh đọc nhầm khi slot bị reuse.
 
 Project dùng `rte_hash` ở mode lock-free (`RW_CONCURRENCY_LF`) và gắn thêm `RCU/QSBR`. Mục đích là để aging có thể xóa flow trong khi dispatcher/worker vẫn đang chạy mà không cần global lock. Các thread reader sẽ register vào QSBR và báo `quiescent state` định kỳ. Nhờ đó việc reclaim entry sau khi delete sẽ an toàn hơn.
 
@@ -47,3 +47,16 @@ Stats của project được làm theo kiểu **per-lcore counters** bằng `rte
 - số rule đang active
 - protocol counters
 - chi tiết từng worker
+
+Telemetry hiện tại tách rõ:
+
+- `Deleted Flows`: tổng flow bị xóa
+- `Timeout Delete`: số flow bị timeout và delete thành công
+- `Pressure Evict`: số flow bị evict do overload/replacement
+- `SPI Forwarded | Rule Matches`: số packet forward và số lần worker match SPI
+
+Giới hạn cần nói rõ khi bảo vệ:
+
+- parser hiện chỉ xử lý IPv4 TCP/UDP trên segment đầu tiên của mbuf
+- không có xử lý đầy đủ cho IPv4 fragment hoặc scattered RX/jumbo path
+- ứng dụng hiện yêu cầu tối thiểu 2 DPDK ports (`PORT_IN = 0`, `PORT_OUT = 1`)

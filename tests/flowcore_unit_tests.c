@@ -97,6 +97,7 @@ test_unsupported_and_truncated_packets(void)
 {
     uint8_t packet[TEST_PACKET_LEN];
     struct ipv4_5tuple_key key;
+    struct rte_ipv4_hdr *ipv4_hdr;
 
     memset(packet, 0, sizeof(packet));
     ((struct rte_ether_hdr *)packet)->ether_type = rte_cpu_to_be_16(0x0806);
@@ -118,6 +119,17 @@ test_unsupported_and_truncated_packets(void)
                 sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + 1,
                 &key) == FLOW_PACKET_PARSE_TRUNCATED,
             "short TCP/UDP ports should be truncated");
+
+    build_ipv4_l4_packet(packet, IPPROTO_UDP,
+            rte_cpu_to_be_32(0x0a000003),
+            rte_cpu_to_be_32(0x0a000004),
+            rte_cpu_to_be_16(3000),
+            rte_cpu_to_be_16(4000));
+    ipv4_hdr = (struct rte_ipv4_hdr *)(packet + sizeof(struct rte_ether_hdr));
+    ipv4_hdr->fragment_offset = rte_cpu_to_be_16(RTE_IPV4_HDR_MF_FLAG);
+    expect_true(flow_packet_extract_key(packet, sizeof(packet), &key) ==
+            FLOW_PACKET_PARSE_UNSUPPORTED,
+            "IPv4 fragments should be unsupported");
 }
 
 static void

@@ -89,7 +89,11 @@ ports_init(void)
             return ret;
         }
     }
-    rte_eth_tx_queue_setup(PORT_IN, 0, nb_txd, socket_id_in, NULL);
+    ret = rte_eth_tx_queue_setup(PORT_IN, 0, nb_txd, socket_id_in, NULL);
+    if (ret < 0) {
+        printf("Cannot setup tx queue for port in\n");
+        return ret;
+    }
 
     tx_rings = NUM_WORKERS;
     ret = rte_eth_dev_configure(PORT_OUT, rx_rings, tx_rings, &port_conf);
@@ -98,13 +102,19 @@ ports_init(void)
         return ret;
     }
 
-    rte_eth_rx_queue_setup(PORT_OUT, 0, nb_rxd, socket_id_out,
+    ret = rte_eth_rx_queue_setup(PORT_OUT, 0, nb_rxd, socket_id_out,
             NULL, mbuf_pool);
+    if (ret < 0) {
+        printf("Cannot setup rx queue for port out\n");
+        return ret;
+    }
     for (q = 0; q < tx_rings; q++) {
         ret = rte_eth_tx_queue_setup(PORT_OUT, q, nb_txd,
                 socket_id_out, NULL);
-        if (ret != 0)
+        if (ret != 0) {
             printf("Cannot setup tx queue %u for port out\n", q);
+            return ret;
+        }
     }
 
     ret = rte_eth_dev_start(PORT_IN);
@@ -236,8 +246,8 @@ app_init(int argc, char *argv[])
         rte_exit(EXIT_FAILURE, "Cannot init stats\n");
 
     nb_ports = rte_eth_dev_count_avail();
-    if (nb_ports < 1)
-        rte_exit(EXIT_FAILURE, "Not enough ports\n");
+    if (nb_ports < 2)
+        rte_exit(EXIT_FAILURE, "Need at least 2 ports (PORT_IN=0, PORT_OUT=1)\n");
 
     if (rte_lcore_count() < NUM_WORKERS + 2)
         rte_exit(EXIT_FAILURE, "Need at least %d cores "

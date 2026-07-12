@@ -298,22 +298,3 @@ spi_rule_engine_rule_count(void)
 
     return active != NULL ? active->count : 0;
 }
-
-uint8_t
-spi_rule_engine_eval(struct flow_table_ctx *ft, uint32_t flow_idx)
-{
-    const struct spi_rule_table *active =
-        __atomic_load_n(&g_active_rules, __ATOMIC_ACQUIRE);
-    struct flow_hot_data *hot = &ft->hot[flow_idx];
-
-    if (active == NULL)
-        return SPI_ACTION_FORWARD;
-
-    if (likely(hot->action_version == active->version) &&
-        likely(hot->spi_action != SPI_ACTION_UNKNOWN))
-        return hot->spi_action;
-
-    hot->spi_action = match_cold_against_table(active, &ft->cold[flow_idx]);
-    hot->action_version = active->version;
-    return hot->spi_action;
-}

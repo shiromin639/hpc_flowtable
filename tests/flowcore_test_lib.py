@@ -95,7 +95,9 @@ def parse_metrics(output: str) -> dict:
 
     return {
         "created_flows": last_int(r"Created Flows\s*:\s*(\d+)"),
-        "deleted_flows": last_int(r"Deleted/Timeout:\s*(\d+)"),
+        "deleted_flows": last_int(r"Deleted Flows\s*:\s*(\d+)"),
+        "timeout_deletes": last_int(r"Timeout Delete:\s*(\d+)"),
+        "pressure_evictions": last_int(r"Pressure Evict:\s*(\d+)"),
         "active_flows": last_int(r"Active Flows\s*:\s*(\d+)"),
         "rx_filtered": last_int(r"RX Filtered\s*:\s*(\d+)"),
         "spi_drops": last_int(r"SPI Drops\s*:\s*(\d+)"),
@@ -103,7 +105,10 @@ def parse_metrics(output: str) -> dict:
         "active_rules": last_int(r"Active Rules\s*:\s*(\d+)"),
         "rule_version": last_int(r"Active Rules\s*:\s*\d+\s+Rules\s+\|\s*(\d+)"),
         "spi_forwarded": last_int(r"SPI Forwarded\s*:\s*(\d+)"),
-        "rechecks": last_int(r"SPI Forwarded\s*:\s*\d+\s+Pkts\s+\|\s*(\d+)"),
+        "rule_matches": last_int(
+            r"SPI Forwarded\s*:\s*\d+\s+Pkts\s+\|\s*(\d+)"),
+        "rechecks": last_int(
+            r"SPI Forwarded\s*:\s*\d+\s+Pkts\s+\|\s*(\d+)"),
         "protocols": {
             "http": http,
             "https": https,

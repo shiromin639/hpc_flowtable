@@ -20,10 +20,8 @@ struct ipv4_5tuple_key {
 struct flow_hot_data {
     uint64_t last_seen;     /* TSC timestamp - updated every packet */
     uint32_t flow_gen;      /* Detect stale flow_idx metadata in worker */
-    uint32_t action_version;/* Cached SPI rule-table version */
     uint8_t  worker_id;     /* Worker core assignment */
-    uint8_t  spi_action;    /* Cached SPI decision */
-    uint8_t  pad[2];
+    uint8_t  pad[3];
 };
 
 struct flow_cold_data {
@@ -43,12 +41,35 @@ struct flow_table_ctx {
     struct flow_hot_data  *hot;          
     struct flow_cold_data *cold;        
     uint32_t              aging_iter;
+    uint32_t              pressure_iter;
+    uint32_t              emergency_iter;
 };
 
 struct flow_aging_result {
     uint32_t scanned;
     uint32_t expired;
     uint32_t deleted;
+};
+
+enum flow_pressure_mode {
+    FLOW_PRESSURE_NORMAL = 0,
+    FLOW_PRESSURE_PRESSURE,
+    FLOW_PRESSURE_AGGRESSIVE,
+    FLOW_PRESSURE_CRITICAL,
+};
+
+struct flow_pressure_result {
+    uint32_t scanned;
+    uint32_t candidates;
+    uint32_t evicted;
+    uint32_t stale;
+};
+
+struct flow_victim_candidate {
+    struct ipv4_5tuple_key key;
+    uint32_t position;
+    uint32_t flow_gen;
+    uint64_t last_seen;
 };
 
 static inline uint64_t
@@ -88,6 +109,15 @@ void flow_table_rcu_offline(unsigned int thread_id);
 void flow_table_rcu_quiescent(unsigned int thread_id);
 void flow_table_rcu_unregister(unsigned int thread_id);
 struct flow_aging_result flow_table_aging_tick(void);
+enum flow_pressure_mode flow_table_pressure_mode(uint32_t active_flows);
+const char *flow_table_pressure_mode_name(enum flow_pressure_mode mode);
+struct flow_pressure_result flow_table_pressure_maintenance(
+        enum flow_pressure_mode mode, uint32_t active_flows);
+int flow_table_evict_for_replacement(uint32_t max_cached_attempts,
+        uint32_t emergency_scan_budget);
+uint64_t flow_table_reclaim(uint32_t max_rounds);
+uint32_t flow_table_victim_cache_count(void);
+uint32_t flow_table_capacity(void);
 struct flow_table_ctx *flow_table_get_ctx(void);
 
 #endif /* FLOW_TABLE_H */

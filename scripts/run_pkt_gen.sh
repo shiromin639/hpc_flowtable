@@ -7,6 +7,6 @@ sudo dpdk-testpmd -l 6-8 -n 4 \
   --in-memory \
   -- \
   --forward-mode=flowgen \
-  --flowgen-flows=1000000 \
+  --flowgen-flows=900000 \
   --stats-period=1 \
   --interactive

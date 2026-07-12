@@ -65,6 +65,13 @@ stats_collect_totals(struct lcore_stats *totals)
         totals->tx_drop_pkts += stats->tx_drop_pkts;
         totals->flows_created += stats->flows_created;
         totals->flows_deleted += stats->flows_deleted;
+        totals->replacement_attempts += stats->replacement_attempts;
+        totals->replacement_success += stats->replacement_success;
+        totals->replacement_failures += stats->replacement_failures;
+        totals->victim_evicted_flows += stats->victim_evicted_flows;
+        totals->victim_cache_empty += stats->victim_cache_empty;
+        totals->flow_add_retry_success += stats->flow_add_retry_success;
+        totals->flow_add_retry_failures += stats->flow_add_retry_failures;
         totals->spi_pkts_forwarded += stats->spi_pkts_forwarded;
         totals->spi_pkts_dropped += stats->spi_pkts_dropped;
         totals->spi_rule_revalidations += stats->spi_rule_revalidations;

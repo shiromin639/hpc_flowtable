@@ -49,18 +49,25 @@ stats_thread(__rte_unused void *arg)
         local_stats->aging_deleted += aged.deleted;
         local_stats->flows_deleted += aged.deleted;
 
+        int32_t pressure_active_flows = rte_hash_count(ft->hash);
+        if (pressure_active_flows > 0) {
+            enum flow_pressure_mode pressure_mode =
+                flow_table_pressure_mode((uint32_t)pressure_active_flows);
+
+            if (pressure_mode != FLOW_PRESSURE_NORMAL) {
+                struct flow_pressure_result pressure =
+                    flow_table_pressure_maintenance(pressure_mode,
+                            (uint32_t)pressure_active_flows);
+
+                local_stats->aging_scanned += pressure.scanned;
+                local_stats->flows_deleted += pressure.evicted;
+                local_stats->victim_evicted_flows += pressure.evicted;
+            }
+        }
+
         flow_table_rcu_quiescent(lcore_id);
 
-        uint64_t reclaimed_this_tick = 0;
-        for (unsigned int reclaim_round = 0; reclaim_round < 1024;
-                reclaim_round++) {
-            unsigned int freed = 0;
-
-            if (rte_hash_rcu_qsbr_dq_reclaim(ft->hash, &freed,
-                        NULL, NULL) != 0 || freed == 0)
-                break;
-            reclaimed_this_tick += freed;
-        }
+        uint64_t reclaimed_this_tick = flow_table_reclaim(1024);
         local_stats->aging_reclaimed += reclaimed_this_tick;
 
         tick_counter++;
@@ -96,6 +103,11 @@ stats_thread(__rte_unused void *arg)
                 prev_totals.flows_created, elapsed_sec);
         uint64_t dps = stats_rate_per_sec(totals.flows_deleted,
                 prev_totals.flows_deleted, elapsed_sec);
+        uint64_t timeout_delete_ps = stats_rate_per_sec(totals.aging_deleted,
+                prev_totals.aging_deleted, elapsed_sec);
+        uint64_t pressure_evict_ps = stats_rate_per_sec(
+                totals.victim_evicted_flows,
+                prev_totals.victim_evicted_flows, elapsed_sec);
         uint64_t spi_drop_ps = stats_rate_per_sec(totals.spi_pkts_dropped,
                 prev_totals.spi_pkts_dropped, elapsed_sec);
         uint64_t tx_drop_ps = stats_rate_per_sec(totals.tx_drop_pkts,
@@ -109,6 +121,9 @@ stats_thread(__rte_unused void *arg)
         uint64_t aging_reclaim_ps = stats_rate_per_sec(totals.aging_reclaimed,
                 prev_totals.aging_reclaimed, elapsed_sec);
         int32_t active_flows = rte_hash_count(ft->hash);
+        enum flow_pressure_mode pressure_mode = flow_table_pressure_mode(
+                active_flows > 0 ? (uint32_t)active_flows : 0);
+        uint32_t victim_cache_count = flow_table_victim_cache_count();
 
         printf("\033[1;1H\033[J");
         printf("================ PERFORMANCE STATS ================\n");
@@ -122,9 +137,14 @@ stats_thread(__rte_unused void *arg)
                totals.rx_filtered_pkts, filtered_ps);
         printf("Active Flows  : %10d Flows\n", active_flows);
         printf("Created Flows : %10"PRIu64" Flows\n", totals.flows_created);
-        printf("Deleted/Timeout: %9"PRIu64" Flows\n", totals.flows_deleted);
+        printf("Deleted Flows : %10"PRIu64" Flows\n", totals.flows_deleted);
+        printf("Timeout Delete: %10"PRIu64" Flows\n", totals.aging_deleted);
+        printf("Pressure Evict: %10"PRIu64" Flows\n",
+               totals.victim_evicted_flows);
         printf("Flow Rate     : %10"PRIu64" C/s | %10"PRIu64" D/s\n",
                cps, dps);
+        printf("Delete Split  : timeout=%"PRIu64"/s evict=%"PRIu64"/s\n",
+               timeout_delete_ps, pressure_evict_ps);
         printf("SPI Drops     : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
                totals.spi_pkts_dropped, spi_drop_ps);
         printf("TX Drops      : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
@@ -133,12 +153,23 @@ stats_thread(__rte_unused void *arg)
                totals.ring_drop_pkts, ring_drop_ps);
         printf("Hash Add Fail : %10"PRIu64" Fails | %10"PRIu64" Fails/s\n",
                totals.hash_add_failures, hash_fail_ps);
+        printf("Flow Pressure : %10s | active=%10d | victim_cache=%6"PRIu32"\n",
+               flow_table_pressure_mode_name(pressure_mode),
+               active_flows, victim_cache_count);
+        printf("Replacement   : attempts=%"PRIu64" success=%"PRIu64
+               " fail=%"PRIu64" evicted=%"PRIu64"\n",
+               totals.replacement_attempts, totals.replacement_success,
+               totals.replacement_failures, totals.victim_evicted_flows);
+        printf("Retry Add     : success=%"PRIu64" fail=%"PRIu64
+               " cache_empty=%"PRIu64"\n",
+               totals.flow_add_retry_success,
+               totals.flow_add_retry_failures, totals.victim_cache_empty);
         printf("Active Rules  : %10"PRIu32" Rules | %10"PRIu32" Version\n",
                spi_rule_engine_rule_count(), spi_rule_engine_version());
-        printf("SPI Forwarded : %10"PRIu64" Pkts | %10"PRIu64" Rechecks\n",
+        printf("SPI Forwarded : %10"PRIu64" Pkts | %10"PRIu64" Rule Matches\n",
                totals.spi_pkts_forwarded, totals.spi_rule_revalidations);
-        printf("Aging         : scan=%"PRIu64"/s expire=%"PRIu64"/s "
-               "delete=%"PRIu64"/s reclaim=%"PRIu64"/s\n",
+        printf("Aging         : scan=%"PRIu64"/s timeout_seen=%"PRIu64"/s "
+               "timeout_del=%"PRIu64"/s reclaim=%"PRIu64"/s\n",
                aging_scan_ps, aging_expire_ps, aging_delete_ps,
                aging_reclaim_ps);
         printf("Protocols     : HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64
@@ -172,7 +203,7 @@ stats_thread(__rte_unused void *arg)
                     prev_worker_revalidations[w], elapsed_sec);
 
             printf("Worker %-3d lcore %-3u | IN %10"PRIu64" PPS | TX %10"PRIu64" PPS %10"PRIu64" Mbps "
-                   "| SPI_DROP %8"PRIu64"/s | TX_DROP %8"PRIu64"/s | RECHECK %8"PRIu64"/s\n",
+                   "| SPI_DROP %8"PRIu64"/s | TX_DROP %8"PRIu64"/s | MATCH %10"PRIu64"/s\n",
                    w, wl, w_in_pps, w_pps, w_mbps, w_spi_drop_ps,
                    w_tx_drop_ps, w_recheck_ps);
             printf("  HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64

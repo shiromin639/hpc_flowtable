@@ -37,22 +37,35 @@ worker_thread(void *arg)
 
         stats->worker_rx_pkts += nb_rx;
         uint16_t tx_count = 0;
-        uint32_t active_rule_version = spi_rule_engine_version();
 
         for (uint16_t i = 0; i < nb_rx; i++) {
             uint32_t flow_idx = pkts[i]->hash.fdir.lo;
             uint32_t flow_gen = pkts[i]->hash.fdir.hi;
             struct flow_cold_data parsed_cold;
+            struct flow_cold_data slot_cold;
             const struct flow_cold_data *cold;
             uint8_t action;
 
             if (likely(flow_idx < ft->storage_entries &&
                        flow_hot_generation_load(&ft->hot[flow_idx]) == flow_gen)) {
-                cold = &ft->cold[flow_idx];
-                if (unlikely(ft->hot[flow_idx].action_version !=
-                             active_rule_version))
-                    stats->spi_rule_revalidations++;
-                action = spi_rule_engine_eval(ft, flow_idx);
+                slot_cold = ft->cold[flow_idx];
+                if (unlikely(flow_hot_generation_load(&ft->hot[flow_idx]) !=
+                             flow_gen)) {
+                    if (flow_packet_extract_cold(rte_pktmbuf_mtod(pkts[i],
+                                    void *), rte_pktmbuf_data_len(pkts[i]),
+                                &parsed_cold) != FLOW_PACKET_PARSE_OK) {
+                        stats->spi_pkts_dropped++;
+                        rte_pktmbuf_free(pkts[i]);
+                        continue;
+                    }
+
+                    cold = &parsed_cold;
+                } else {
+                    cold = &slot_cold;
+                }
+
+                stats->spi_rule_revalidations++;
+                action = spi_rule_engine_match_cold(cold);
             } else {
                 if (flow_packet_extract_cold(rte_pktmbuf_mtod(pkts[i], void *),
                             rte_pktmbuf_data_len(pkts[i]),

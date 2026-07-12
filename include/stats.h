@@ -15,6 +15,13 @@ struct lcore_stats {
     uint64_t tx_drop_pkts;
     uint64_t flows_created;
     uint64_t flows_deleted;
+    uint64_t replacement_attempts;
+    uint64_t replacement_success;
+    uint64_t replacement_failures;
+    uint64_t victim_evicted_flows;
+    uint64_t victim_cache_empty;
+    uint64_t flow_add_retry_success;
+    uint64_t flow_add_retry_failures;
     uint64_t spi_pkts_forwarded;
     uint64_t spi_pkts_dropped;
     uint64_t spi_rule_revalidations;
