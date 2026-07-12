@@ -429,7 +429,8 @@ Packet ownership:
 - Nếu enqueue thành công: worker sở hữu mbuf.
 - Nếu worker SPI drop: worker free.
 - Nếu TX burst nhận packet: PMD/TX path sở hữu.
-- Nếu TX burst không nhận hết: worker free unsent suffix.
+- Nếu TX queue tạm thời chưa nhận hết: worker giữ packet trong pending TX cục bộ và flush pending trước khi dequeue thêm packet mới.
+- Nếu pending không còn chỗ hoặc khi thoát chương trình vẫn chưa gửi được: worker free phần còn lại và tăng `tx_drop_pkts`.
 
 Flow table ownership:
 

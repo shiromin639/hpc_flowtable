@@ -88,7 +88,8 @@ Pressure/replacement:
 - 96% tăng scan/evict mạnh hơn.
 - 99% critical: stats/aging thread dùng min-idle bằng 0 và scan budget lớn hơn; dispatcher vẫn chỉ evict khi add flow mới fail.
 - Victim cache giúp dispatcher không scan nặng trên hot path.
-- Emergency scan bị giới hạn 512 entry để cold path không treo lâu.
+- `FLOW_EMERGENCY_SCAN_BUDGET` hiện đóng vai trò bật/tắt emergency path; implementation đang sample cố định 16 vòng, mỗi vòng 4 slot ngẫu nhiên, tức tối đa khoảng 64 random probes để tránh cold path treo lâu.
+- `FLOW_RECLAIM_REPLACEMENT_BUDGET` được dispatcher dùng sau replacement. `FLOW_RECLAIM_BUDGET` hiện là macro dự phòng; stats thread đang gọi `flow_table_reclaim(1024)` trực tiếp mỗi tick.
 
 Tradeoff:
 
@@ -526,8 +527,9 @@ Worker:
 - `rte_eth_tx_burst()` có thể nhận ít hơn `tx_count`.
 - Packet TX thành công do PMD/TX path sở hữu.
 - Packet chưa TX:
-  - tăng `tx_drop_pkts`
-  - free mbuf.
+  - worker giữ trong pending TX cục bộ
+  - worker ưu tiên flush pending trước khi dequeue thêm packet từ ring
+  - nếu pending không còn chỗ hoặc khi thoát chương trình vẫn chưa gửi được thì tăng `tx_drop_pkts` và free mbuf.
 
 ## 7. Worker: Vì Sao Không Parse Lại Mọi Packet
 
@@ -686,7 +688,7 @@ Tradeoff:
 
 `pressure_evict_budget()`:
 
-- Evict đủ để kéo active về target 92%. Code hiện không cap riêng theo mode; mode ảnh hưởng scan budget và min idle.
+- Budget mục tiêu là `active_flows - target_92%`. Số flow xóa thực tế có thể thấp hơn vì còn phụ thuộc scan budget, min-idle policy và candidate hợp lệ. Code hiện không cap riêng theo mode; mode ảnh hưởng scan budget và min idle.
 
 ### Victim cache
 
@@ -718,7 +720,7 @@ Lý do:
 Tradeoff:
 
 - Có thêm work trên flow miss/add fail, nhưng không ảnh hưởng flow hit.
-- Emergency scan bounded nên không đảm bảo luôn tìm victim, nhưng tránh latency spike.
+- Emergency scan hiện là bounded random sampling nhỏ nên không đảm bảo luôn tìm victim, nhưng tránh latency spike.
 
 ## 10. Concurrency Model
 
@@ -744,6 +746,7 @@ Tradeoff:
 - Victim validation: key/position/generation/last_seen check before delete.
 - Per-lcore stats: avoids global atomic counter hot path.
 - SP/SC rings: matches one dispatcher producer, one worker consumer.
+- Worker không register QSBR trong code hiện tại vì worker không lookup/delete `rte_hash`; worker chỉ đọc side arrays qua `flow_idx/flow_gen` và dựa vào generation + snapshot để bảo vệ semantic slot reuse.
 
 ### RCU bảo vệ gì và không bảo vệ gì
 
@@ -937,7 +940,7 @@ Nếu bị hỏi endian:
 
 - Pop tối đa `max_cached_attempts` từ victim cache.
 - Mỗi candidate đều revalidate.
-- Nếu không có cached victim, emergency scan bounded.
+- Nếu không evict được cached victim, emergency scan bounded bằng random sampling nhỏ.
 
 ### `flow_table_reclaim()`
 
@@ -1050,6 +1053,7 @@ Nhược:
 
 - Không đảm bảo victim là cold nhất toàn hệ thống.
 - Candidate stale cần revalidate.
+- Chưa có metric riêng cho số candidate stale trong victim cache; hiện chỉ có replacement success/failure và cache empty.
 
 Alternative:
 
@@ -1068,7 +1072,6 @@ Chọn snapshot:
 Nhược:
 
 - Match rule mỗi packet.
-- Chưa có metric riêng cho số candidate stale trong victim cache; hiện chỉ có replacement success/failure và cache empty.
 
 Alternative:
 

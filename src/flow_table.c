@@ -1,6 +1,5 @@
 #include "flow_table.h"
 #include "common.h"
-#include <errno.h>
 #include <rte_build_config.h>
 #include <rte_cycles.h>
 #include <rte_hash.h>

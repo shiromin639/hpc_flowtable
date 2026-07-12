@@ -10,16 +10,17 @@
 #include <stdint.h>
 #include <signal.h>
 
-#define NUM_MBUFS 32768 
+#define NUM_MBUFS       32768 
 #define NUM_WORKERS     4
 #define MBUF_CACHE_SIZE 250
 #define RX_DESC_PER_QUEUE 1024
 #define TX_DESC_PER_QUEUE 1024
-#define RING_SIZE       4096
+#define RING_SIZE      32768 
 #ifndef HASH_ENTRIES
 #define HASH_ENTRIES    (1024 * 1024)   /* 1M entries */
 #endif
 #define BURST_SIZE      32
+#define TX_RETRY_BUDGET 8
 
 #define PORT_IN         0
 #define PORT_OUT        1

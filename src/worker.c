@@ -13,7 +13,107 @@
 #include <rte_mbuf.h>
 #include <rte_ring.h>
 #include <rte_lcore.h>
+#include <rte_pause.h>
 #include <stdio.h>
+#include <string.h>
+
+struct worker_tx_pending {
+    struct rte_mbuf *pkts[BURST_SIZE];
+    uint32_t pkt_lens[BURST_SIZE];
+    uint16_t count;
+};
+
+static uint16_t
+worker_flush_tx_pending(uint32_t worker_id, struct worker_tx_pending *pending,
+        struct lcore_stats *stats)
+{
+    uint16_t sent_total = 0;
+    uint16_t no_progress_retries = 0;
+
+    while (sent_total < pending->count) {
+        uint16_t sent = rte_eth_tx_burst(PORT_OUT, worker_id,
+                &pending->pkts[sent_total], pending->count - sent_total);
+
+        if (sent > 0) {
+            stats->tx_pkts += sent;
+            for (uint16_t i = 0; i < sent; i++)
+                stats->tx_bytes += pending->pkt_lens[sent_total + i];
+
+            sent_total += sent;
+            no_progress_retries = 0;
+            continue;
+        }
+
+        if (++no_progress_retries >= TX_RETRY_BUDGET)
+            break;
+
+        rte_pause();
+    }
+
+    if (sent_total == 0)
+        return 0;
+
+    if (sent_total < pending->count) {
+        uint16_t remaining = pending->count - sent_total;
+
+        memmove(pending->pkts, &pending->pkts[sent_total],
+                remaining * sizeof(pending->pkts[0]));
+        memmove(pending->pkt_lens, &pending->pkt_lens[sent_total],
+                remaining * sizeof(pending->pkt_lens[0]));
+        pending->count = remaining;
+    } else {
+        pending->count = 0;
+    }
+
+    return sent_total;
+}
+
+static void
+worker_stage_tx_burst(struct worker_tx_pending *pending,
+        struct rte_mbuf **tx_pkts, uint16_t tx_count,
+        struct lcore_stats *stats)
+{
+    uint16_t space = BURST_SIZE - pending->count;
+    uint16_t staged = tx_count < space ? tx_count : space;
+
+    for (uint16_t i = 0; i < staged; i++) {
+        pending->pkts[pending->count] = tx_pkts[i];
+        pending->pkt_lens[pending->count] = tx_pkts[i]->pkt_len;
+        pending->count++;
+    }
+
+    if (unlikely(staged < tx_count)) {
+        stats->tx_drop_pkts += tx_count - staged;
+        for (uint16_t i = staged; i < tx_count; i++)
+            rte_pktmbuf_free(tx_pkts[i]);
+    }
+}
+
+static void
+worker_drop_tx_pending(struct worker_tx_pending *pending,
+        struct lcore_stats *stats)
+{
+    if (pending->count == 0)
+        return;
+
+    stats->tx_drop_pkts += pending->count;
+    for (uint16_t i = 0; i < pending->count; i++)
+        rte_pktmbuf_free(pending->pkts[i]);
+
+    pending->count = 0;
+}
+
+static void
+worker_drain_tx_pending_on_exit(uint32_t worker_id,
+        struct worker_tx_pending *pending, struct lcore_stats *stats)
+{
+    for (uint16_t i = 0; i < TX_RETRY_BUDGET && pending->count > 0; i++) {
+        if (worker_flush_tx_pending(worker_id, pending, stats) == 0)
+            rte_pause();
+    }
+
+    worker_drop_tx_pending(pending, stats);
+}
 
 int
 worker_thread(void *arg)
@@ -22,7 +122,8 @@ worker_thread(void *arg)
     uint32_t worker_id = wargs->worker_id;
     struct rte_mbuf *pkts[BURST_SIZE];
     struct rte_mbuf *tx_pkts[BURST_SIZE];
-    uint16_t nb_rx, nb_tx;
+    struct worker_tx_pending tx_pending = { 0 };
+    uint16_t nb_rx;
     unsigned int lcore_id = rte_lcore_id();
     struct flow_table_ctx *ft = flow_table_get_ctx();
     struct lcore_stats *stats = stats_get_current();
@@ -30,6 +131,14 @@ worker_thread(void *arg)
     printf("Worker %u running on lcore %u\n", worker_id, lcore_id);
 
     while (!force_quit) {
+        if (tx_pending.count > 0) {
+            worker_flush_tx_pending(worker_id, &tx_pending, stats);
+            if (tx_pending.count > 0) {
+                rte_pause();
+                continue;
+            }
+        }
+
         nb_rx = rte_ring_dequeue_burst(worker_rings[worker_id],
                 (void **)pkts, BURST_SIZE, NULL);
         if (unlikely(nb_rx == 0))
@@ -95,17 +204,9 @@ worker_thread(void *arg)
         if (unlikely(tx_count == 0))
             continue;
 
-        nb_tx = rte_eth_tx_burst(PORT_OUT, worker_id, tx_pkts, tx_count);
-
-        stats->tx_pkts += nb_tx;
-        for (uint16_t i = 0; i < nb_tx; i++)
-            stats->tx_bytes += tx_pkts[i]->pkt_len;
-
-        if (unlikely(nb_tx < tx_count)) {
-            stats->tx_drop_pkts += tx_count - nb_tx;
-            for (uint16_t i = nb_tx; i < tx_count; i++)
-                rte_pktmbuf_free(tx_pkts[i]);
-        }
+        worker_stage_tx_burst(&tx_pending, tx_pkts, tx_count, stats);
+        worker_flush_tx_pending(worker_id, &tx_pending, stats);
     }
+    worker_drain_tx_pending_on_exit(worker_id, &tx_pending, stats);
     return 0;
 }
