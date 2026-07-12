@@ -24,7 +24,7 @@ struct lcore_stats {
     uint64_t flow_add_retry_failures;
     uint64_t spi_pkts_forwarded;
     uint64_t spi_pkts_dropped;
-    uint64_t spi_rule_revalidations;
+    uint64_t spi_rule_checks;
     uint64_t aging_scanned;
     uint64_t aging_expired;
     uint64_t aging_deleted;

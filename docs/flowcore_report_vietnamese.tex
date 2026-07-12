@@ -228,7 +228,7 @@ Luồng xử lý bắt đầu từ dispatcher trên main lcore. Dispatcher nhậ
 \hline
 \texttt{AGING\_BATCH\_SIZE} & 1024 & Số key hết hạn gom mỗi batch xóa \\
 \hline
-\texttt{FLOW\_PRESSURE\_*} & 85/90/95\% & Các watermark điều khiển pressure maintenance và replacement \\
+\texttt{FLOW\_PRESSURE\_*} & 92/96/99\% & Các watermark điều khiển pressure maintenance và replacement, target sau evict là 92\% \\
 \hline
 \texttt{FLOW\_VICTIM\_CACHE\_SIZE} & 8192 & Số candidate victim tối đa được cache cho dispatcher \\
 \hline
@@ -375,7 +375,6 @@ struct flow_table_ctx {
     struct flow_cold_data *cold;
     uint32_t              aging_iter;
     uint32_t              pressure_iter;
-    uint32_t              emergency_iter;
 };
 \end{lstlisting}
 
@@ -411,7 +410,7 @@ Dispatcher thực hiện các bước:
     \item Ghi key hợp lệ vào mảng stack và gọi \texttt{rte\_hash\_lookup\_bulk()}.
     \item Với flow hit: lấy \texttt{worker\_id}, cập nhật \texttt{last\_seen}.
     \item Với flow miss: gọi \texttt{rte\_hash\_add\_key()}, khởi tạo cold data, tăng \texttt{flow\_gen}, gán worker, store \texttt{last\_seen} cuối cùng và tăng \texttt{flows\_created}.
-    \item Nếu add fail hoặc active flow ở mức critical: evict victim từ victim cache hoặc emergency scan nhỏ, reclaim một phần rồi retry add flow mới.
+    \item Nếu add fail: evict victim từ victim cache hoặc emergency scan nhỏ, reclaim một phần rồi retry add flow mới.
     \item Ghi \texttt{flow\_idx} và \texttt{flow\_gen} vào \texttt{m->hash.fdir.lo/hi}.
     \item Gom packet theo worker và enqueue burst vào ring tương ứng.
 \end{enumerate}
@@ -494,9 +493,9 @@ Tradeoff là snapshot thống kê không tuyệt đối nhất quán tại từn
 
 Khi số flow tiến gần giới hạn của Flow Table, hệ thống không chuyển sang xử lý stateless. Lý do là yêu cầu chính của đề tài là quản lý Flow Table: flow mới cần có bản ghi, có \texttt{worker\_id}, \texttt{last\_seen}, vòng đời create/update/delete và thống kê active/created/deleted. Vì vậy cơ chế overload được thiết kế theo hướng stateful replacement: flow cũ bị thay thế để nhường chỗ cho flow mới.
 
-Stats/aging thread định kỳ tính pressure mode dựa trên số active flow. Khi vượt watermark, thread này scan thêm một phần hash table, evict flow cũ theo hướng idle-first và đưa candidate vào victim cache. Dispatcher chỉ dùng victim cache trong cold path của flow mới: nếu \texttt{rte\_hash\_add\_key()} fail hoặc active flow đang ở mức critical, dispatcher evict một victim, reclaim một phần bằng QSBR, rồi retry add flow mới. Packet hiện tại sau đó được xử lý với flow entry mới.
+Stats/aging thread định kỳ tính pressure mode dựa trên số active flow. Khi vượt watermark, thread này scan thêm một phần hash table, evict flow cũ theo hướng idle-first và đưa candidate vào victim cache. Dispatcher chỉ dùng victim cache trong cold path của flow mới: nếu \texttt{rte\_hash\_add\_key()} fail, dispatcher evict một victim, reclaim một phần bằng QSBR, rồi retry add flow mới. Packet hiện tại sau đó được xử lý với flow entry mới.
 
-Victim cache không chỉ lưu key mà còn lưu \texttt{position}, \texttt{flow\_gen} và \texttt{last\_seen} của candidate. Trước khi xóa, code lookup lại key và kiểm tra các giá trị này để chắc rằng slot chưa đổi chủ và đã publish xong. Nếu candidate đã stale, dispatcher hoặc stats thread bỏ candidate đó và thử candidate khác. Cơ chế này làm replacement an toàn hơn trong bối cảnh aging, add flow mới và worker ring có thể chạy song song.
+Victim cache hiện là một \texttt{rte\_ring} SP/SC. Khi enqueue, code pack \texttt{position} và \texttt{flow\_gen} vào một object 64 bit; khi dequeue, key được dựng lại từ \texttt{cold[position]}. Trước khi xóa, code lookup lại key và kiểm tra position, generation và \texttt{last\_seen} để chắc rằng slot chưa đổi chủ và đã publish xong. Nếu candidate đã stale, dispatcher hoặc stats thread bỏ candidate đó và thử candidate khác. Cơ chế này làm replacement an toàn hơn trong bối cảnh aging, add flow mới và worker ring có thể chạy song song.
 
 Tradeoff của replacement là capacity cứng không tăng: bảng 1M entry vẫn chỉ quản lý khoảng 1M flow state tại một thời điểm. Cơ chế này giúp hệ thống chịu flow churn tốt hơn và ưu tiên flow mới, nhưng flow cũ bị evict sẽ mất state. Nếu packet của flow cũ quay lại, nó lookup miss và được tạo lại như một flow mới. Nếu workload có hơn 1M flow đều active thật sự, giải pháp đúng là tăng capacity, shard Flow Table hoặc dùng RSS/multi-dispatcher để partition state.
 
@@ -543,7 +542,7 @@ Thống kê được tổ chức theo per-lcore bằng \texttt{rte\_lcore\_var},
     \item RX/TX throughput theo PPS và Mbps.
     \item Active flows, created flows, deleted flows tổng, timeout delete và pressure evict.
     \item Flow creation/deletion rate và tách riêng tốc độ timeout delete / pressure evict.
-    \item SPI forwarded/dropped, rule version, Rule Matches. Tên field trong code còn là \texttt{spi\_rule\_revalidations}, nhưng ý nghĩa hiện tại là số lần worker match SPI sau khi đã bỏ cache action per-flow.
+    \item SPI forwarded/dropped, rule version và Rule Checks. Counter \texttt{spi\_rule\_checks} đếm số lần worker chạy SPI check trên cold-data snapshot hoặc parse fallback.
     \item Ring drop, TX drop, hash add failure.
     \item Aging scan/timeout-seen/timeout-delete/reclaim rate.
     \item Protocol counters và chi tiết từng worker.
@@ -575,7 +574,7 @@ Flow affinity & \texttt{worker\_id} lưu trong \texttt{hot[]} và được looku
 \hline
 Phân tải 4--8 worker & Hiện cấu hình 4 worker cố định & Hoàn thành mức 4 worker \\
 \hline
-Flow aging/timeout & Stats thread gọi aging tick, xóa batch, RCU reclaim & Hoàn thành, timeout hiện là 1 giây \\
+Flow aging/timeout & Stats thread gọi aging tick, xóa batch, RCU reclaim & Hoàn thành, timeout hiện là 5 giây \\
 \hline
 Thống kê realtime & In PPS, Mbps, active flow, drop, protocol, per-worker & Hoàn thành \\
 \hline

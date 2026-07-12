@@ -18,7 +18,7 @@ stats_thread(__rte_unused void *arg)
     uint64_t prev_worker_rx_pkts[NUM_WORKERS] = { 0 };
     uint64_t prev_worker_spi_drops[NUM_WORKERS] = { 0 };
     uint64_t prev_worker_tx_drops[NUM_WORKERS] = { 0 };
-    uint64_t prev_worker_revalidations[NUM_WORKERS] = { 0 };
+    uint64_t prev_worker_spi_checks[NUM_WORKERS] = { 0 };
 
     struct flow_table_ctx *ft = flow_table_get_ctx();
     unsigned int lcore_id = rte_lcore_id();
@@ -166,8 +166,8 @@ stats_thread(__rte_unused void *arg)
                totals.flow_add_retry_failures, totals.victim_cache_empty);
         printf("Active Rules  : %10"PRIu32" Rules | %10"PRIu32" Version\n",
                spi_rule_engine_rule_count(), spi_rule_engine_version());
-        printf("SPI Forwarded : %10"PRIu64" Pkts | %10"PRIu64" Rule Matches\n",
-               totals.spi_pkts_forwarded, totals.spi_rule_revalidations);
+        printf("SPI Forwarded : %10"PRIu64" Pkts | %10"PRIu64" Rule Checks\n",
+               totals.spi_pkts_forwarded, totals.spi_rule_checks);
         printf("Aging         : scan=%"PRIu64"/s timeout_seen=%"PRIu64"/s "
                "timeout_del=%"PRIu64"/s reclaim=%"PRIu64"/s\n",
                aging_scan_ps, aging_expire_ps, aging_delete_ps,
@@ -188,7 +188,7 @@ stats_thread(__rte_unused void *arg)
             uint64_t w_tx_bytes = worker_stats->tx_bytes;
             uint64_t w_spi_drops = worker_stats->spi_pkts_dropped;
             uint64_t w_tx_drops = worker_stats->tx_drop_pkts;
-            uint64_t w_revalidations = worker_stats->spi_rule_revalidations;
+            uint64_t w_spi_checks = worker_stats->spi_rule_checks;
             uint64_t w_in_pps = stats_rate_per_sec(w_rx_pkts,
                     prev_worker_rx_pkts[w], elapsed_sec);
             uint64_t w_pps = stats_rate_per_sec(w_tx_pkts,
@@ -199,13 +199,13 @@ stats_thread(__rte_unused void *arg)
                     prev_worker_spi_drops[w], elapsed_sec);
             uint64_t w_tx_drop_ps = stats_rate_per_sec(w_tx_drops,
                     prev_worker_tx_drops[w], elapsed_sec);
-            uint64_t w_recheck_ps = stats_rate_per_sec(w_revalidations,
-                    prev_worker_revalidations[w], elapsed_sec);
+            uint64_t w_spi_check_ps = stats_rate_per_sec(w_spi_checks,
+                    prev_worker_spi_checks[w], elapsed_sec);
 
             printf("Worker %-3d lcore %-3u | IN %10"PRIu64" PPS | TX %10"PRIu64" PPS %10"PRIu64" Mbps "
-                   "| SPI_DROP %8"PRIu64"/s | TX_DROP %8"PRIu64"/s | MATCH %10"PRIu64"/s\n",
+                   "| SPI_DROP %8"PRIu64"/s | TX_DROP %8"PRIu64"/s | SPI_CHECK %10"PRIu64"/s\n",
                    w, wl, w_in_pps, w_pps, w_mbps, w_spi_drop_ps,
-                   w_tx_drop_ps, w_recheck_ps);
+                   w_tx_drop_ps, w_spi_check_ps);
             printf("  HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64
                    " TCP=%"PRIu64" UDP=%"PRIu64" OTHER=%"PRIu64"\n",
                    worker_stats->http_pkts,
@@ -220,7 +220,7 @@ stats_thread(__rte_unused void *arg)
             prev_worker_tx_bytes[w] = w_tx_bytes;
             prev_worker_spi_drops[w] = w_spi_drops;
             prev_worker_tx_drops[w] = w_tx_drops;
-            prev_worker_revalidations[w] = w_revalidations;
+            prev_worker_spi_checks[w] = w_spi_checks;
         }
         printf("=====================================================\n\n");
         fflush(stdout);

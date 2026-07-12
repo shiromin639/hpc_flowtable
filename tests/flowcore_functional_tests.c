@@ -38,7 +38,7 @@ struct metrics {
     unsigned long long active_rules;
     unsigned long long rule_version;
     unsigned long long spi_forwarded;
-    unsigned long long rechecks;
+    unsigned long long rule_checks;
     unsigned long long http;
     unsigned long long https;
     unsigned long long dns;
@@ -686,8 +686,8 @@ parse_metrics(const char *clean_output, struct metrics *metrics)
         if (sscanf(line, "Active Rules  : %llu Rules | %llu Version",
                    &metrics->active_rules, &metrics->rule_version) == 2)
             continue;
-        if (sscanf(line, "SPI Forwarded : %llu Pkts | %llu Rule Matches",
-                   &metrics->spi_forwarded, &metrics->rechecks) == 2)
+        if (sscanf(line, "SPI Forwarded : %llu Pkts | %llu Rule Checks",
+                   &metrics->spi_forwarded, &metrics->rule_checks) == 2)
             continue;
         if (sscanf(line,
                    "Protocols     : HTTP=%llu HTTPS=%llu DNS=%llu TCP=%llu UDP=%llu OTHER=%llu",

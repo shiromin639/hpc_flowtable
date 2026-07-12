@@ -5,6 +5,7 @@ Bộ tài liệu này mô tả trạng thái hiện tại của mã nguồn Flow
 
 - `current_architecture.md`: kiến trúc runtime, project structure, pipeline, thread/port/ring model và flow lifecycle.
 - `current_optimization.md`: các kỹ thuật tối ưu chính đang dùng, lý do chọn, tradeoff và alternative.
+- `test_coverage_current.md`: từng test case hiện có, cách mô phỏng, mức độ tin cậy và giới hạn/bias.
 - `defense_guide_current.md`: hướng dẫn bảo vệ chi tiết, bao gồm cấu trúc project, struct/field, câu hỏi phản biện, kịch bản lỗi, hướng ôn tập DPDK/C/OS/kiến trúc máy tính.
 - `flowcore_report_vietnamese.tex`: bản nháp báo cáo LaTeX tiếng Việt.
 

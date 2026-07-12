@@ -5,13 +5,10 @@
 #include <rte_cycles.h>
 #include <rte_hash.h>
 #include <rte_hash_crc.h>
-#include <rte_jhash.h>
-#include <rte_lcore.h>
 #include <rte_malloc.h>
 #include <rte_random.h>
 #include <rte_rcu_qsbr.h>
 #include <rte_ring.h>
-#include <rte_spinlock.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,39 +16,58 @@ static struct flow_table_ctx g_ft_ctx;
 
 static struct rte_ring *g_victim_ring = NULL;
 
-static uint32_t flow_pct(uint32_t value, uint32_t pct) {
+static uint32_t
+flow_pct(uint32_t value, uint32_t pct)
+{
     return (uint32_t)(((uint64_t)value * pct) / 100);
 }
 
-static int victim_cache_push(const struct flow_victim_candidate *candidate) {
+static void
+candidate_load_slot(struct flow_victim_candidate *candidate, uint32_t position)
+{
+    memset(candidate, 0, sizeof(*candidate));
+    candidate->key.ip_src = g_ft_ctx.cold[position].src_ip;
+    candidate->key.ip_dst = g_ft_ctx.cold[position].dst_ip;
+    candidate->key.port_src = g_ft_ctx.cold[position].src_port;
+    candidate->key.port_dst = g_ft_ctx.cold[position].dst_port;
+    candidate->key.proto = g_ft_ctx.cold[position].protocol;
+    candidate->position = position;
+    candidate->flow_gen = flow_hot_generation_load(&g_ft_ctx.hot[position]);
+    candidate->last_seen = flow_hot_last_seen_load(&g_ft_ctx.hot[position]);
+}
+
+static int
+victim_cache_push(const struct flow_victim_candidate *candidate)
+{
     if (unlikely(g_victim_ring == NULL))
         return -ENOENT;
 
+    /*
+     * Pack position and generation into one ring object. The key is rebuilt
+     * from cold[] on dequeue to avoid a per-candidate allocation/copy.
+     */
     uint64_t obj = ((uint64_t)candidate->position << 32) | candidate->flow_gen;
     if (rte_ring_sp_enqueue(g_victim_ring, (void *)(uintptr_t)obj) == 0)
         return 0;
     return -ENOSPC;
 }
 
-static unsigned int victim_cache_pop_burst(struct flow_victim_candidate *candidates, unsigned int n) {
+static unsigned int
+victim_cache_pop_burst(struct flow_victim_candidate *candidates, unsigned int n)
+{
     if (unlikely(g_victim_ring == NULL))
         return 0;
 
     void *objs[16];
-    if (n > 16) n = 16;
+    if (n > RTE_DIM(objs))
+        n = RTE_DIM(objs);
 
     unsigned int popped = rte_ring_sc_dequeue_burst(g_victim_ring, objs, n, NULL);
     for (unsigned int i = 0; i < popped; i++) {
         uint32_t pos = (uint32_t)((uint64_t)(uintptr_t)objs[i] >> 32);
         uint32_t gen = (uint32_t)((uint64_t)(uintptr_t)objs[i] & 0xFFFFFFFF);
 
-        memset(&candidates[i], 0, sizeof(candidates[i]));
-        candidates[i].key.ip_src = g_ft_ctx.cold[pos].src_ip;
-        candidates[i].key.ip_dst = g_ft_ctx.cold[pos].dst_ip;
-        candidates[i].key.port_src = g_ft_ctx.cold[pos].src_port;
-        candidates[i].key.port_dst = g_ft_ctx.cold[pos].dst_port;
-        candidates[i].key.proto = g_ft_ctx.cold[pos].protocol;
-        candidates[i].position = pos;
+        candidate_load_slot(&candidates[i], pos);
         candidates[i].flow_gen = gen;
     }
 
@@ -202,7 +218,8 @@ int flow_table_init(int socket_id) {
     if (g_victim_ring) {
         rte_ring_free(g_victim_ring);
     }
-    g_victim_ring = rte_ring_create("victim_ring", 1024, socket_id,
+    g_victim_ring = rte_ring_create("victim_ring", FLOW_VICTIM_CACHE_SIZE,
+                                    socket_id,
                                     RING_F_SP_ENQ | RING_F_SC_DEQ);
 
     struct rte_hash_parameters hash_params = {
@@ -277,7 +294,6 @@ int flow_table_init(int socket_id) {
 
     g_ft_ctx.aging_iter = 0;
     g_ft_ctx.pressure_iter = 0;
-    g_ft_ctx.emergency_iter = 0;
     printf("[FlowTable] Init OK: %d hash entries, %u storage slots, LF+RCU, %d "
            "aging chunks\n",
            HASH_ENTRIES, g_ft_ctx.storage_entries, AGING_NUM_CHUNKS);
@@ -507,7 +523,10 @@ int flow_table_evict_for_replacement(uint32_t max_cached_attempts,
     unsigned int popped;
     int evicted = 0;
 
-    popped = victim_cache_pop_burst(candidates, 16);
+    if (max_cached_attempts > RTE_DIM(candidates))
+        max_cached_attempts = RTE_DIM(candidates);
+
+    popped = victim_cache_pop_burst(candidates, max_cached_attempts);
     for (unsigned int i = 0; i < popped; i++) {
         if (candidate_delete_if_valid(&candidates[i], now_tsc, 0)) {
             evicted++;
@@ -536,16 +555,7 @@ int flow_table_evict_for_replacement(uint32_t max_cached_attempts,
             }
 
             if (found) {
-                memset(&candidate, 0, sizeof(candidate));
-                candidate.key.ip_src = g_ft_ctx.cold[best_pos].src_ip;
-                candidate.key.ip_dst = g_ft_ctx.cold[best_pos].dst_ip;
-                candidate.key.port_src = g_ft_ctx.cold[best_pos].src_port;
-                candidate.key.port_dst = g_ft_ctx.cold[best_pos].dst_port;
-                candidate.key.proto = g_ft_ctx.cold[best_pos].protocol;
-                candidate.position = best_pos;
-                candidate.flow_gen =
-                    flow_hot_generation_load(&g_ft_ctx.hot[best_pos]);
-                candidate.last_seen = oldest_time;
+                candidate_load_slot(&candidate, best_pos);
 
                 if (candidate_delete_if_valid(&candidate, now_tsc, 0)) {
                     batch_evicted++;

@@ -28,3 +28,6 @@ python3 tests/run_performance_tests.py
 ```
 
 The generated directory is intentionally git-ignored. The scripts recreate any missing fixtures on demand.
+
+For a case-by-case explanation of what each test simulates and what it does
+or does not prove, see `docs/test_coverage_current.md`.

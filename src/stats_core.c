@@ -74,7 +74,7 @@ stats_collect_totals(struct lcore_stats *totals)
         totals->flow_add_retry_failures += stats->flow_add_retry_failures;
         totals->spi_pkts_forwarded += stats->spi_pkts_forwarded;
         totals->spi_pkts_dropped += stats->spi_pkts_dropped;
-        totals->spi_rule_revalidations += stats->spi_rule_revalidations;
+        totals->spi_rule_checks += stats->spi_rule_checks;
         totals->aging_scanned += stats->aging_scanned;
         totals->aging_expired += stats->aging_expired;
         totals->aging_deleted += stats->aging_deleted;

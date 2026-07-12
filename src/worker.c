@@ -64,7 +64,7 @@ worker_thread(void *arg)
                     cold = &slot_cold;
                 }
 
-                stats->spi_rule_revalidations++;
+                stats->spi_rule_checks++;
                 action = spi_rule_engine_match_cold(cold);
             } else {
                 if (flow_packet_extract_cold(rte_pktmbuf_mtod(pkts[i], void *),
@@ -76,7 +76,7 @@ worker_thread(void *arg)
                 }
 
                 cold = &parsed_cold;
-                stats->spi_rule_revalidations++;
+                stats->spi_rule_checks++;
                 action = spi_rule_engine_match_cold(cold);
             }
 

@@ -53,7 +53,7 @@ Telemetry hiện tại tách rõ:
 - `Deleted Flows`: tổng flow bị xóa
 - `Timeout Delete`: số flow bị timeout và delete thành công
 - `Pressure Evict`: số flow bị evict do overload/replacement
-- `SPI Forwarded | Rule Matches`: số packet forward và số lần worker match SPI
+- `SPI Forwarded | Rule Checks`: số packet forward và số lần worker chạy SPI check
 
 Giới hạn cần nói rõ khi bảo vệ:
 

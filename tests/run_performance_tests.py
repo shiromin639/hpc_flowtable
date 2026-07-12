@@ -34,7 +34,7 @@ def run_scenario(name: str, rx_name: str, rules_name: str,
             "spi_forwarded": result.metrics["spi_forwarded"],
             "spi_drops": result.metrics["spi_drops"],
             "tx_drops": result.metrics["tx_drops"],
-            "rechecks": result.metrics["rechecks"],
+            "rule_checks": result.metrics["rule_checks"],
             "protocols": result.metrics["protocols"],
         }
 
@@ -58,7 +58,7 @@ def main() -> int:
         print(
             f"- {result['name']}: forwarded={result['spi_forwarded']} "
             f"created={result['created_flows']} dropped={result['spi_drops']} "
-            f"rechecks={result['rechecks']} elapsed={result['elapsed_sec']}s"
+            f"rule_checks={result['rule_checks']} elapsed={result['elapsed_sec']}s"
         )
     print(f"\nWrote results to {result_path}")
     return 0

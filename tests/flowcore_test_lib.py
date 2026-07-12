@@ -105,10 +105,8 @@ def parse_metrics(output: str) -> dict:
         "active_rules": last_int(r"Active Rules\s*:\s*(\d+)"),
         "rule_version": last_int(r"Active Rules\s*:\s*\d+\s+Rules\s+\|\s*(\d+)"),
         "spi_forwarded": last_int(r"SPI Forwarded\s*:\s*(\d+)"),
-        "rule_matches": last_int(
-            r"SPI Forwarded\s*:\s*\d+\s+Pkts\s+\|\s*(\d+)"),
-        "rechecks": last_int(
-            r"SPI Forwarded\s*:\s*\d+\s+Pkts\s+\|\s*(\d+)"),
+        "rule_checks": last_int(
+            r"SPI Forwarded\s*:\s*\d+\s+Pkts\s+\|\s*(\d+)\s+Rule Checks"),
         "protocols": {
             "http": http,
             "https": https,

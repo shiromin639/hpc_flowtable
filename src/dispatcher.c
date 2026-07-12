@@ -11,6 +11,52 @@
 #include <string.h>
 
 static int
+find_resolved_duplicate(const struct ipv4_5tuple_key *keys,
+        const uint16_t *resolved_indices, uint16_t resolved_count,
+        uint16_t key_index)
+{
+    for (uint16_t i = 0; i < resolved_count; i++) {
+        if (memcmp(&keys[key_index], &keys[resolved_indices[i]],
+                    sizeof(keys[key_index])) == 0)
+            return (int)i;
+    }
+
+    return -1;
+}
+
+static void
+stamp_mbuf_flow(struct rte_mbuf *m, uint32_t flow_idx, uint32_t flow_gen)
+{
+    m->hash.fdir.lo = flow_idx;
+    m->hash.fdir.hi = flow_gen;
+}
+
+static int
+publish_new_flow(struct flow_table_ctx *ft,
+        const struct ipv4_5tuple_key *key, const void *key_ptr,
+        int32_t flow_idx, uint64_t current_tsc,
+        uint32_t *target_worker, uint32_t *flow_gen)
+{
+    if (unlikely((uint32_t)flow_idx >= ft->storage_entries))
+        return -1;
+
+    /*
+     * Increment generation before overwriting cold[] so queued packets from
+     * the previous slot owner fail worker validation instead of reading new
+     * flow metadata.
+     */
+    *flow_gen = flow_hot_generation_next(&ft->hot[flow_idx]);
+    flow_cold_from_key(&ft->cold[flow_idx], key, current_tsc);
+
+    *target_worker = rte_hash_hash(ft->hash, key_ptr) % NUM_WORKERS;
+    ft->hot[flow_idx].worker_id = (uint8_t)*target_worker;
+
+    /* last_seen publishes the side-array slot to aging/replacement code. */
+    flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
+    return 0;
+}
+
+static int
 dispatcher_evict_for_replacement(struct lcore_stats *stats,
         unsigned int lcore_id)
 {
@@ -107,14 +153,8 @@ dispatcher_thread(__rte_unused void *arg)
                 int flow_idx = positions[i];
                 uint32_t target_worker;
                 uint32_t flow_gen;
-                int duplicate_idx = -1;
-
-                for (uint16_t j = 0; j < resolved_count; j++) {
-                    if (memcmp(&keys[i], &keys[resolved_indices[j]], sizeof(keys[i])) == 0) {
-                        duplicate_idx = j;
-                        break;
-                    }
-                }
+                int duplicate_idx = find_resolved_duplicate(keys,
+                        resolved_indices, resolved_count, i);
 
                 if (unlikely(duplicate_idx >= 0)) {
                     flow_idx = resolved_positions[duplicate_idx];
@@ -122,8 +162,7 @@ dispatcher_thread(__rte_unused void *arg)
                     flow_gen = resolved_generations[duplicate_idx];
                     flow_hot_last_seen_store(&ft->hot[flow_idx], current_tsc);
 
-                    m->hash.fdir.lo = (uint32_t)flow_idx;
-                    m->hash.fdir.hi = flow_gen;
+                    stamp_mbuf_flow(m, (uint32_t)flow_idx, flow_gen);
                     worker_buffers[target_worker][worker_counts[target_worker]++] = m;
                     continue;
                 }
@@ -148,27 +187,13 @@ dispatcher_thread(__rte_unused void *arg)
                     }
 
                     if (likely(flow_idx >= 0)) {
-                        if (unlikely((uint32_t)flow_idx >= ft->storage_entries)) {
+                        if (publish_new_flow(ft, &keys[i], key_ptrs[i],
+                                    flow_idx, current_tsc, &target_worker,
+                                    &flow_gen) != 0) {
                             stats->hash_add_failures++;
                             rte_pktmbuf_free(m);
                             continue;
                         }
-
-                        /*
-                         * Invalidate any queued mbuf metadata for an older
-                         * occupant before replacing the side-array contents.
-                         */
-                        flow_gen = flow_hot_generation_next(&ft->hot[flow_idx]);
-
-                        flow_cold_from_key(&ft->cold[flow_idx], &keys[i],
-                                current_tsc);
-
-                        hash_sig_t hash_val = rte_hash_hash(ft->hash, key_ptrs[i]);
-                        target_worker = hash_val % NUM_WORKERS;
-
-                        ft->hot[flow_idx].worker_id = target_worker;
-                        flow_hot_last_seen_store(&ft->hot[flow_idx],
-                                current_tsc);
                         stats->flows_created++;
                     } else {
                         rte_pktmbuf_free(m);
@@ -191,8 +216,7 @@ dispatcher_thread(__rte_unused void *arg)
                 resolved_generations[resolved_count] = flow_gen;
                 resolved_count++;
 
-                m->hash.fdir.lo = (uint32_t)flow_idx;
-                m->hash.fdir.hi = flow_gen;
+                stamp_mbuf_flow(m, (uint32_t)flow_idx, flow_gen);
                 worker_buffers[target_worker][worker_counts[target_worker]++] = m;
             }
 

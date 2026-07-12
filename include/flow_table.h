@@ -42,7 +42,6 @@ struct flow_table_ctx {
     struct flow_cold_data *cold;        
     uint32_t              aging_iter;
     uint32_t              pressure_iter;
-    uint32_t              emergency_iter;
 };
 
 struct flow_aging_result {
