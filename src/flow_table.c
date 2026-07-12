@@ -9,6 +9,7 @@
 #include <rte_malloc.h>
 #include <rte_lcore.h>
 #include <rte_spinlock.h>
+#include <rte_ring.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,15 +17,7 @@
 
 static struct flow_table_ctx g_ft_ctx;
 
-struct flow_victim_cache {
-    rte_spinlock_t lock;
-    struct flow_victim_candidate entries[FLOW_VICTIM_CACHE_SIZE];
-    uint32_t head;
-    uint32_t tail;
-    uint32_t count;
-};
-
-static struct flow_victim_cache g_victim_cache;
+static struct rte_ring *g_victim_ring = NULL;
 
 static uint32_t
 flow_pct(uint32_t value, uint32_t pct)
@@ -32,52 +25,41 @@ flow_pct(uint32_t value, uint32_t pct)
     return (uint32_t)(((uint64_t)value * pct) / 100);
 }
 
-static void
-victim_cache_reset(void)
-{
-    rte_spinlock_init(&g_victim_cache.lock);
-    memset(g_victim_cache.entries, 0, sizeof(g_victim_cache.entries));
-    g_victim_cache.head = 0;
-    g_victim_cache.tail = 0;
-    g_victim_cache.count = 0;
-}
-
 static int
 victim_cache_push(const struct flow_victim_candidate *candidate)
 {
-    int ret = 0;
+    if (unlikely(g_victim_ring == NULL))
+        return -ENOENT;
 
-    rte_spinlock_lock(&g_victim_cache.lock);
-    if (g_victim_cache.count >= FLOW_VICTIM_CACHE_SIZE) {
-        ret = -ENOSPC;
-    } else {
-        g_victim_cache.entries[g_victim_cache.tail] = *candidate;
-        g_victim_cache.tail = (g_victim_cache.tail + 1) %
-            FLOW_VICTIM_CACHE_SIZE;
-        g_victim_cache.count++;
-    }
-    rte_spinlock_unlock(&g_victim_cache.lock);
-
-    return ret;
+    uint64_t obj = ((uint64_t)candidate->position << 32) | candidate->flow_gen;
+    if (rte_ring_sp_enqueue(g_victim_ring, (void *)(uintptr_t)obj) == 0)
+        return 0;
+    return -ENOSPC;
 }
 
 static int
 victim_cache_pop(struct flow_victim_candidate *candidate)
 {
-    int ret = 0;
+    if (unlikely(g_victim_ring == NULL))
+        return -ENOENT;
 
-    rte_spinlock_lock(&g_victim_cache.lock);
-    if (g_victim_cache.count == 0) {
-        ret = -ENOENT;
-    } else {
-        *candidate = g_victim_cache.entries[g_victim_cache.head];
-        g_victim_cache.head = (g_victim_cache.head + 1) %
-            FLOW_VICTIM_CACHE_SIZE;
-        g_victim_cache.count--;
-    }
-    rte_spinlock_unlock(&g_victim_cache.lock);
+    void *obj;
+    if (rte_ring_sc_dequeue(g_victim_ring, &obj) != 0)
+        return -ENOENT;
 
-    return ret;
+    uint32_t pos = (uint32_t)((uint64_t)(uintptr_t)obj >> 32);
+    uint32_t gen = (uint32_t)((uint64_t)(uintptr_t)obj & 0xFFFFFFFF);
+
+    memset(candidate, 0, sizeof(*candidate));
+    candidate->key.ip_src = g_ft_ctx.cold[pos].src_ip;
+    candidate->key.ip_dst = g_ft_ctx.cold[pos].dst_ip;
+    candidate->key.port_src = g_ft_ctx.cold[pos].src_port;
+    candidate->key.port_dst = g_ft_ctx.cold[pos].dst_port;
+    candidate->key.proto = g_ft_ctx.cold[pos].protocol;
+    candidate->position = pos;
+    candidate->flow_gen = gen;
+
+    return 0;
 }
 
 static int
@@ -232,7 +214,11 @@ int
 flow_table_init(int socket_id)
 {
     memset(&g_ft_ctx, 0, sizeof(g_ft_ctx));
-    victim_cache_reset();
+    if (g_victim_ring) {
+        rte_ring_free(g_victim_ring);
+    }
+    g_victim_ring = rte_ring_create("victim_ring", 1024, socket_id,
+            RING_F_SP_ENQ | RING_F_SC_DEQ);
 
     struct rte_hash_parameters hash_params = {
         .name = "flow_table_lf",
@@ -331,7 +317,10 @@ flow_table_destroy(void)
     if (g_ft_ctx.cold)
         rte_free(g_ft_ctx.cold);
     memset(&g_ft_ctx, 0, sizeof(g_ft_ctx));
-    victim_cache_reset();
+    if (g_victim_ring) {
+        rte_ring_free(g_victim_ring);
+        g_victim_ring = NULL;
+    }
 }
 
 void
@@ -626,13 +615,9 @@ flow_table_reclaim(uint32_t max_rounds)
 uint32_t
 flow_table_victim_cache_count(void)
 {
-    uint32_t count;
-
-    rte_spinlock_lock(&g_victim_cache.lock);
-    count = g_victim_cache.count;
-    rte_spinlock_unlock(&g_victim_cache.lock);
-
-    return count;
+    if (!g_victim_ring)
+        return 0;
+    return rte_ring_count(g_victim_ring);
 }
 
 uint32_t
