@@ -16,10 +16,68 @@
 
 static struct flow_table_ctx g_ft_ctx;
 
+struct flow_victim_cache {
+    rte_spinlock_t lock;
+    struct flow_victim_candidate entries[FLOW_VICTIM_CACHE_SIZE];
+    uint32_t head;
+    uint32_t tail;
+    uint32_t count;
+};
+
+static struct flow_victim_cache g_victim_cache;
+
 static uint32_t
 flow_pct(uint32_t value, uint32_t pct)
 {
     return (uint32_t)(((uint64_t)value * pct) / 100);
+}
+
+static void
+victim_cache_reset(void)
+{
+    rte_spinlock_init(&g_victim_cache.lock);
+    memset(g_victim_cache.entries, 0, sizeof(g_victim_cache.entries));
+    g_victim_cache.head = 0;
+    g_victim_cache.tail = 0;
+    g_victim_cache.count = 0;
+}
+
+static int
+victim_cache_push(const struct flow_victim_candidate *candidate)
+{
+    int ret = 0;
+
+    rte_spinlock_lock(&g_victim_cache.lock);
+    if (g_victim_cache.count >= FLOW_VICTIM_CACHE_SIZE) {
+        ret = -ENOSPC;
+    } else {
+        g_victim_cache.entries[g_victim_cache.tail] = *candidate;
+        g_victim_cache.tail = (g_victim_cache.tail + 1) %
+            FLOW_VICTIM_CACHE_SIZE;
+        g_victim_cache.count++;
+    }
+    rte_spinlock_unlock(&g_victim_cache.lock);
+
+    return ret;
+}
+
+static int
+victim_cache_pop(struct flow_victim_candidate *candidate)
+{
+    int ret = 0;
+
+    rte_spinlock_lock(&g_victim_cache.lock);
+    if (g_victim_cache.count == 0) {
+        ret = -ENOENT;
+    } else {
+        *candidate = g_victim_cache.entries[g_victim_cache.head];
+        g_victim_cache.head = (g_victim_cache.head + 1) %
+            FLOW_VICTIM_CACHE_SIZE;
+        g_victim_cache.count--;
+    }
+    rte_spinlock_unlock(&g_victim_cache.lock);
+
+    return ret;
 }
 
 static int
@@ -174,6 +232,7 @@ int
 flow_table_init(int socket_id)
 {
     memset(&g_ft_ctx, 0, sizeof(g_ft_ctx));
+    victim_cache_reset();
 
     struct rte_hash_parameters hash_params = {
         .name = "flow_table_lf",
@@ -272,6 +331,7 @@ flow_table_destroy(void)
     if (g_ft_ctx.cold)
         rte_free(g_ft_ctx.cold);
     memset(&g_ft_ctx, 0, sizeof(g_ft_ctx));
+    victim_cache_reset();
 }
 
 void
@@ -429,7 +489,7 @@ flow_table_pressure_maintenance(enum flow_pressure_mode mode,
     uint64_t min_idle_cycles;
     uint32_t scan_budget;
     uint32_t evict_budget;
-
+    uint32_t candidate_budget = FLOW_VICTIM_FILL_BATCH;
     const void *next_key;
     void *next_data;
     int32_t position;
@@ -470,10 +530,12 @@ flow_table_pressure_maintenance(enum flow_pressure_mode mode,
             } else {
                 result.stale++;
             }
-            
-            if (result.evicted >= evict_budget) {
-                break;
-            }
+            continue;
+        }
+
+        if (result.candidates < candidate_budget &&
+            victim_cache_push(&candidate) == 0) {
+            result.candidates++;
         }
     }
 
@@ -482,10 +544,23 @@ flow_table_pressure_maintenance(enum flow_pressure_mode mode,
 
 
 int
-flow_table_evict_for_replacement(uint32_t emergency_scan_budget)
+flow_table_evict_for_replacement(uint32_t max_cached_attempts,
+        uint32_t emergency_scan_budget)
 {
     uint64_t now_tsc = rte_rdtsc();
     struct flow_victim_candidate candidate;
+    uint32_t pop_attempts = max_cached_attempts;
+
+    if (pop_attempts == 0)
+        pop_attempts = 1;
+
+    for (uint32_t i = 0; i < pop_attempts; i++) {
+        if (victim_cache_pop(&candidate) != 0)
+            break;
+
+        if (candidate_delete_if_valid(&candidate, now_tsc, 0))
+            return 1;
+    }
 
     if (emergency_scan_budget > 0) {
         int batch_evicted = 0;
@@ -548,7 +623,17 @@ flow_table_reclaim(uint32_t max_rounds)
     return reclaimed;
 }
 
+uint32_t
+flow_table_victim_cache_count(void)
+{
+    uint32_t count;
 
+    rte_spinlock_lock(&g_victim_cache.lock);
+    count = g_victim_cache.count;
+    rte_spinlock_unlock(&g_victim_cache.lock);
+
+    return count;
+}
 
 uint32_t
 flow_table_capacity(void)

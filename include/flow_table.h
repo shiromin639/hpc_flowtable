@@ -113,8 +113,10 @@ enum flow_pressure_mode flow_table_pressure_mode(uint32_t active_flows);
 const char *flow_table_pressure_mode_name(enum flow_pressure_mode mode);
 struct flow_pressure_result flow_table_pressure_maintenance(
         enum flow_pressure_mode mode, uint32_t active_flows);
-int flow_table_evict_for_replacement(uint32_t emergency_scan_budget);
+int flow_table_evict_for_replacement(uint32_t max_cached_attempts,
+        uint32_t emergency_scan_budget);
 uint64_t flow_table_reclaim(uint32_t max_rounds);
+uint32_t flow_table_victim_cache_count(void);
 uint32_t flow_table_capacity(void);
 struct flow_table_ctx *flow_table_get_ctx(void);
 
