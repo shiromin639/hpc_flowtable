@@ -123,7 +123,7 @@ stats_thread(__rte_unused void *arg)
         int32_t active_flows = rte_hash_count(ft->hash);
         enum flow_pressure_mode pressure_mode = flow_table_pressure_mode(
                 active_flows > 0 ? (uint32_t)active_flows : 0);
-        uint32_t victim_cache_count = flow_table_victim_cache_count();
+
 
         printf("\033[1;1H\033[J");
         printf("================ PERFORMANCE STATS ================\n");
@@ -153,17 +153,16 @@ stats_thread(__rte_unused void *arg)
                totals.ring_drop_pkts, ring_drop_ps);
         printf("Hash Add Fail : %10"PRIu64" Fails | %10"PRIu64" Fails/s\n",
                totals.hash_add_failures, hash_fail_ps);
-        printf("Flow Pressure : %10s | active=%10d | victim_cache=%6"PRIu32"\n",
+        printf("Flow Pressure : %10s | active=%10d\n",
                flow_table_pressure_mode_name(pressure_mode),
-               active_flows, victim_cache_count);
+               active_flows);
         printf("Replacement   : attempts=%"PRIu64" success=%"PRIu64
                " fail=%"PRIu64" evicted=%"PRIu64"\n",
                totals.replacement_attempts, totals.replacement_success,
                totals.replacement_failures, totals.victim_evicted_flows);
-        printf("Retry Add     : success=%"PRIu64" fail=%"PRIu64
-               " cache_empty=%"PRIu64"\n",
+        printf("Retry Add     : success=%"PRIu64" fail=%"PRIu64"\n",
                totals.flow_add_retry_success,
-               totals.flow_add_retry_failures, totals.victim_cache_empty);
+               totals.flow_add_retry_failures);
         printf("Active Rules  : %10"PRIu32" Rules | %10"PRIu32" Version\n",
                spi_rule_engine_rule_count(), spi_rule_engine_version());
         printf("SPI Forwarded : %10"PRIu64" Pkts | %10"PRIu64" Rule Matches\n",

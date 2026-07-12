@@ -17,11 +17,9 @@ dispatcher_evict_for_replacement(struct lcore_stats *stats,
     int evicted;
 
     stats->replacement_attempts++;
-    if (flow_table_victim_cache_count() == 0)
-        stats->victim_cache_empty++;
 
-    evicted = flow_table_evict_for_replacement(FLOW_REPLACEMENT_RETRIES,
-            FLOW_EMERGENCY_SCAN_BUDGET);
+
+    evicted = flow_table_evict_for_replacement(FLOW_EMERGENCY_SCAN_BUDGET);
     if (evicted > 0) {
         stats->replacement_success++;
         stats->victim_evicted_flows++;

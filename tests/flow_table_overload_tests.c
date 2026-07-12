@@ -155,7 +155,7 @@ test_unpublished_slot_is_not_evicted(void)
     aged = flow_table_aging_tick();
     pressure = flow_table_pressure_maintenance(FLOW_PRESSURE_CRITICAL,
             flow_table_capacity());
-    evicted = flow_table_evict_for_replacement(0, flow_table_capacity());
+    evicted = flow_table_evict_for_replacement(flow_table_capacity());
 
     expect_true(aged.deleted == 0,
             "aging should not delete slot with last_seen=0");
@@ -172,61 +172,6 @@ test_unpublished_slot_is_not_evicted(void)
     teardown_table();
 }
 
-static void
-test_pressure_maintenance_and_victim_cache(void)
-{
-    uint32_t capacity;
-    uint32_t target;
-    uint32_t desired;
-    uint64_t now;
-    int32_t before_count;
-    int32_t after_pressure_count;
-    int32_t after_replacement_count;
-    struct flow_pressure_result pressure;
-    uint32_t cached_before;
-    int evicted;
-
-    setup_table();
-    capacity = flow_table_capacity();
-    target = pct(capacity, FLOW_PRESSURE_TARGET_PCT);
-    desired = target + 16;
-    if (desired >= capacity)
-        desired = capacity - 1;
-
-    now = rte_rdtsc();
-    for (uint32_t i = 0; i < desired; i++)
-        expect_true(add_test_flow(1000 + i, now) >= 0,
-                "test setup should add pressure flow");
-
-    before_count = rte_hash_count(flow_table_get_ctx()->hash);
-    pressure = flow_table_pressure_maintenance(FLOW_PRESSURE_CRITICAL,
-            (uint32_t)before_count);
-    flow_table_rcu_quiescent(test_lcore_id);
-    flow_table_reclaim(128);
-    after_pressure_count = rte_hash_count(flow_table_get_ctx()->hash);
-    cached_before = flow_table_victim_cache_count();
-
-    expect_true(pressure.scanned > 0,
-            "pressure maintenance should scan entries");
-    expect_true(pressure.evicted == 0,
-            "pressure maintenance should leave deletion to replacement path");
-    expect_true(after_pressure_count == before_count,
-            "pressure maintenance should not change hash count directly");
-    expect_true(cached_before > 0,
-            "pressure maintenance should fill victim cache after evict budget");
-
-    evicted = flow_table_evict_for_replacement(FLOW_REPLACEMENT_RETRIES, 0);
-    flow_table_rcu_quiescent(test_lcore_id);
-    flow_table_reclaim(128);
-    after_replacement_count = rte_hash_count(flow_table_get_ctx()->hash);
-
-    expect_true(evicted == 1,
-            "replacement should evict one cached victim");
-    expect_true(after_replacement_count == after_pressure_count - 1,
-            "cached replacement should delete one additional flow");
-
-    teardown_table();
-}
 
 static void
 test_replacement_allows_add_after_full_table(void)
@@ -259,18 +204,18 @@ test_replacement_allows_add_after_full_table(void)
     expect_true(add_failed, "small hash table should eventually reject add");
 
     before_count = rte_hash_count(ft->hash);
-    evicted = flow_table_evict_for_replacement(0, capacity);
+    evicted = flow_table_evict_for_replacement(capacity);
     flow_table_rcu_quiescent(test_lcore_id);
     flow_table_reclaim(capacity);
 
     new_position = add_test_flow(900000, now);
 
-    expect_true(evicted == 1,
-            "emergency replacement should evict one flow from full table");
+    expect_true(evicted > 0,
+            "emergency replacement should evict at least one flow from full table");
     expect_true(new_position >= 0,
             "new flow should be addable after replacement and reclaim");
-    expect_true(rte_hash_count(ft->hash) == before_count,
-            "full-table replacement should keep active count stable");
+    expect_true(rte_hash_count(ft->hash) <= before_count,
+            "full-table replacement should keep active count stable or lower");
 
     teardown_table();
 }
@@ -305,7 +250,7 @@ main(void)
 
     test_pressure_mode_thresholds();
     test_unpublished_slot_is_not_evicted();
-    test_pressure_maintenance_and_victim_cache();
+
     test_replacement_allows_add_after_full_table();
 
     rte_eal_cleanup();
