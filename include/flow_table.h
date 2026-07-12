@@ -42,7 +42,13 @@ struct flow_table_ctx {
     uint32_t              storage_entries; 
     struct flow_hot_data  *hot;          
     struct flow_cold_data *cold;        
-    uint32_t              current_chunk; 
+    uint32_t              aging_iter;
+};
+
+struct flow_aging_result {
+    uint32_t scanned;
+    uint32_t expired;
+    uint32_t deleted;
 };
 
 static inline uint64_t
@@ -77,8 +83,11 @@ flow_hot_generation_next(struct flow_hot_data *hot)
 int flow_table_init(int socket_id);
 void flow_table_destroy(void);
 void flow_table_rcu_register(unsigned int thread_id);
+void flow_table_rcu_online(unsigned int thread_id);
+void flow_table_rcu_offline(unsigned int thread_id);
 void flow_table_rcu_quiescent(unsigned int thread_id);
-uint32_t flow_table_aging_tick(void);
+void flow_table_rcu_unregister(unsigned int thread_id);
+struct flow_aging_result flow_table_aging_tick(void);
 struct flow_table_ctx *flow_table_get_ctx(void);
 
 #endif /* FLOW_TABLE_H */

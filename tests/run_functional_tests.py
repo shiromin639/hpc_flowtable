@@ -104,6 +104,8 @@ def test_non_tcp_udp_filtered():
         proto = result.metrics["protocols"]
         expect(result.metrics["created_flows"] == 0,
                f"expected 0 created flows, got {result.metrics['created_flows']}")
+        expect(result.metrics["rx_filtered"] == 2,
+               f"expected 2 filtered packets, got {result.metrics['rx_filtered']}")
         expect(result.metrics["spi_forwarded"] == 0,
                f"expected 0 forwarded packets, got {result.metrics['spi_forwarded']}")
         expect(result.metrics["spi_drops"] == 0,

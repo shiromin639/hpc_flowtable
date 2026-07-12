@@ -4,80 +4,16 @@
 
 #include "app_threads.h"
 #include "common.h"
+#include "flow_packet.h"
 #include "flow_table.h"
 #include "spi_engine.h"
 #include "stats.h"
 
 #include <rte_ethdev.h>
-#include <rte_ether.h>
-#include <rte_ip.h>
 #include <rte_mbuf.h>
 #include <rte_ring.h>
 #include <rte_lcore.h>
-#include <rte_byteorder.h>
-#include <netinet/in.h>
 #include <stdio.h>
-#include <string.h>
-
-static inline void
-account_protocol_stats(struct lcore_stats *stats,
-        const struct flow_cold_data *cold)
-{
-    if (cold->protocol == IPPROTO_TCP) {
-        if (cold->dst_port == rte_cpu_to_be_16(80))
-            stats->http_pkts++;
-        else if (cold->dst_port == rte_cpu_to_be_16(443))
-            stats->https_pkts++;
-        else
-            stats->tcp_pkts++;
-        return;
-    }
-
-    if (cold->protocol == IPPROTO_UDP) {
-        if (cold->dst_port == rte_cpu_to_be_16(53))
-            stats->dns_pkts++;
-        else
-            stats->udp_pkts++;
-        return;
-    }
-
-    stats->other_pkts++;
-}
-
-static inline int
-extract_packet_cold(struct rte_mbuf *m, struct flow_cold_data *cold)
-{
-    struct rte_ether_hdr *eth_hdr =
-        rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-    struct rte_ipv4_hdr *ipv4_hdr;
-    uint8_t l3_len;
-    uint16_t *ports;
-
-    if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))
-        return -1;
-
-    ipv4_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
-    l3_len = rte_ipv4_hdr_len(ipv4_hdr);
-    if (ipv4_hdr->next_proto_id != IPPROTO_TCP &&
-        ipv4_hdr->next_proto_id != IPPROTO_UDP)
-        return -1;
-
-    if (l3_len < sizeof(struct rte_ipv4_hdr) ||
-        rte_pktmbuf_data_len(m) <
-        sizeof(*eth_hdr) + l3_len + sizeof(uint16_t) * 2)
-        return -1;
-
-    memset(cold, 0, sizeof(*cold));
-    cold->src_ip = ipv4_hdr->src_addr;
-    cold->dst_ip = ipv4_hdr->dst_addr;
-    cold->protocol = ipv4_hdr->next_proto_id;
-
-    ports = (uint16_t *)((unsigned char *)ipv4_hdr + l3_len);
-    cold->src_port = ports[0];
-    cold->dst_port = ports[1];
-
-    return 0;
-}
 
 int
 worker_thread(void *arg)
@@ -89,7 +25,7 @@ worker_thread(void *arg)
     uint16_t nb_rx, nb_tx;
     unsigned int lcore_id = rte_lcore_id();
     struct flow_table_ctx *ft = flow_table_get_ctx();
-    struct lcore_stats *stats = &lcore_stats[lcore_id];
+    struct lcore_stats *stats = stats_get_current();
 
     printf("Worker %u running on lcore %u\n", worker_id, lcore_id);
 
@@ -99,6 +35,7 @@ worker_thread(void *arg)
         if (unlikely(nb_rx == 0))
             continue;
 
+        stats->worker_rx_pkts += nb_rx;
         uint16_t tx_count = 0;
         uint32_t active_rule_version = spi_rule_engine_version();
 
@@ -117,7 +54,9 @@ worker_thread(void *arg)
                     stats->spi_rule_revalidations++;
                 action = spi_rule_engine_eval(ft, flow_idx);
             } else {
-                if (extract_packet_cold(pkts[i], &parsed_cold) != 0) {
+                if (flow_packet_extract_cold(rte_pktmbuf_mtod(pkts[i], void *),
+                            rte_pktmbuf_data_len(pkts[i]),
+                            &parsed_cold) != FLOW_PACKET_PARSE_OK) {
                     stats->spi_pkts_dropped++;
                     rte_pktmbuf_free(pkts[i]);
                     continue;
@@ -128,7 +67,7 @@ worker_thread(void *arg)
                 action = spi_rule_engine_match_cold(cold);
             }
 
-            account_protocol_stats(stats, cold);
+            flow_stats_account_protocol(stats, cold);
 
             if (action == SPI_ACTION_DROP) {
                 stats->spi_pkts_dropped++;

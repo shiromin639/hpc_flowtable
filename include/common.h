@@ -8,6 +8,7 @@
 #include <rte_ring.h>
 #include <rte_mempool.h>
 #include <stdint.h>
+#include <signal.h>
 
 #define NUM_MBUFS   500000 
 #define NUM_WORKERS     4
@@ -33,7 +34,7 @@
 
 #define AGING_INTERVAL_US   (1000000 / AGING_NUM_CHUNKS)
 
-extern volatile uint8_t force_quit;
+extern volatile sig_atomic_t force_quit;
 extern struct rte_mempool *mbuf_pool;
 extern struct rte_ring *worker_rings[NUM_WORKERS];
 extern unsigned int worker_lcore_ids[NUM_WORKERS];

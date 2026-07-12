@@ -21,7 +21,7 @@ Kiến trúc tổng thể của project là pipeline:
 RX -> Dispatcher -> Flow lookup/create -> Worker ring -> Worker -> SPI -> TX
 ```
 
-Dispatcher nhận burst packet từ `PORT_IN`, parse IPv4/TCP/UDP để lấy 5-tuple, rồi gọi `rte_hash_lookup_bulk()` để lookup nhiều flow cùng lúc. Nếu flow đã có thì lấy `flow_idx`, update `last_seen`, đọc `worker_id` và đẩy packet vào đúng worker ring. Nếu flow chưa có thì thêm flow mới vào hash table, khởi tạo metadata hot/cold, gán worker, rồi route packet sang worker đó.
+Dispatcher nhận burst packet từ `PORT_IN`, parse IPv4/TCP/UDP để lấy 5-tuple, rồi gọi `rte_hash_lookup_bulk()` để lookup nhiều flow cùng lúc. Nếu flow đã có thì lấy `flow_idx`, update `last_seen`, đọc `worker_id` và đẩy packet vào đúng worker ring. Nếu flow chưa có thì thêm flow mới vào hash table, khởi tạo metadata hot/cold, gán worker bằng hash của toàn bộ 5-tuple modulo số worker, rồi route packet sang worker đó.
 
 Trong dispatcher có thêm các mảng `resolved_indices`, `resolved_positions`, `resolved_workers`. Phần này dùng để xử lý trường hợp trong cùng một burst có nhiều packet thuộc cùng một flow mới. Vì `lookup_bulk()` chạy trước, nên có thể cả 2 packet đều thấy miss. Packet đầu tiên sẽ tạo flow, packet sau thì reuse kết quả vừa resolve thay vì add lại lần nữa.
 
@@ -34,15 +34,16 @@ Flow table dùng `rte_hash` để map từ `5-tuple key -> flow_idx`. Hash table
 
 Project dùng `rte_hash` ở mode lock-free (`RW_CONCURRENCY_LF`) và gắn thêm `RCU/QSBR`. Mục đích là để aging có thể xóa flow trong khi dispatcher/worker vẫn đang chạy mà không cần global lock. Các thread reader sẽ register vào QSBR và báo `quiescent state` định kỳ. Nhờ đó việc reclaim entry sau khi delete sẽ an toàn hơn.
 
-Flow aging chạy trong `stats_thread()`. Mỗi flow có `last_seen`, nếu quá timeout thì sẽ bị xóa. Aging không scan toàn bộ table mỗi lần mà chia thành nhiều chunk (`AGING_NUM_CHUNKS`), mỗi tick chỉ scan một chunk. Key nào expired sẽ được gom batch rồi delete, sau đó QSBR reclaim dần.
+Flow aging chạy trong `stats_thread()`. Mỗi flow có `last_seen`, nếu quá `FLOW_TIMEOUT_SEC` thì sẽ bị xóa. Aging dùng iterator tăng dần và scan theo budget mỗi tick, thay vì restart từ đầu hash table mỗi lần. Key nào expired sẽ được gom batch rồi delete, sau đó QSBR reclaim dần.
 
-Stats của project được làm theo kiểu **per-lcore counters**. Mỗi lcore có `lcore_stats` riêng, không dùng một global counter chung cho tất cả thread. Sau đó `stats_thread()` định kỳ cộng dồn lại và in ra:
+Stats của project được làm theo kiểu **per-lcore counters** bằng `rte_lcore_var`. Mỗi lcore có `lcore_stats` riêng, không dùng một global counter chung cho tất cả thread. Sau đó `stats_thread()` định kỳ cộng dồn lại, tính rate theo thời gian TSC thực tế và in ra:
 
 - RX/TX throughput
 - active flows
 - số flow tạo / xóa
 - SPI drop / TX drop
+- filtered RX / ring drop / hash add failure
+- aging scanned / expired / deleted / reclaimed
 - số rule đang active
 - protocol counters
 - chi tiết từng worker
-

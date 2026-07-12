@@ -20,7 +20,7 @@
 #include <string.h>
 #include <unistd.h>
 
-volatile uint8_t force_quit;
+volatile sig_atomic_t force_quit;
 struct rte_mempool *mbuf_pool;
 struct rte_ring *worker_rings[NUM_WORKERS];
 unsigned int worker_lcore_ids[NUM_WORKERS];
@@ -230,6 +230,10 @@ app_init(int argc, char *argv[])
     ret = rte_eal_init(argc, argv);
     if (ret < 0)
         rte_exit(EXIT_FAILURE, "Cannot init EAL\n");
+
+    ret = stats_init();
+    if (ret != 0)
+        rte_exit(EXIT_FAILURE, "Cannot init stats\n");
 
     nb_ports = rte_eth_dev_count_avail();
     if (nb_ports < 1)

@@ -97,6 +97,7 @@ def parse_metrics(output: str) -> dict:
         "created_flows": last_int(r"Created Flows\s*:\s*(\d+)"),
         "deleted_flows": last_int(r"Deleted/Timeout:\s*(\d+)"),
         "active_flows": last_int(r"Active Flows\s*:\s*(\d+)"),
+        "rx_filtered": last_int(r"RX Filtered\s*:\s*(\d+)"),
         "spi_drops": last_int(r"SPI Drops\s*:\s*(\d+)"),
         "tx_drops": last_int(r"TX Drops\s*:\s*(\d+)"),
         "active_rules": last_int(r"Active Rules\s*:\s*(\d+)"),

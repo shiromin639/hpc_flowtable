@@ -32,6 +32,7 @@ struct metrics {
     unsigned long long created_flows;
     unsigned long long deleted_flows;
     unsigned long long active_flows;
+    unsigned long long rx_filtered;
     unsigned long long spi_drops;
     unsigned long long tx_drops;
     unsigned long long active_rules;
@@ -670,6 +671,10 @@ parse_metrics(const char *clean_output, struct metrics *metrics)
             metrics->active_flows = value;
             continue;
         }
+        if (sscanf(line, "RX Filtered   : %llu Pkts", &value) == 1) {
+            metrics->rx_filtered = value;
+            continue;
+        }
         if (sscanf(line, "SPI Drops     : %llu Pkts", &value) == 1) {
             metrics->spi_drops = value;
             continue;
@@ -981,6 +986,9 @@ test_non_tcp_udp_filtered(const char *dir)
     ok &= expect_true(result.metrics.created_flows == 0,
             "non_tcp_udp_filtered: expected created_flows=0, got %llu",
             result.metrics.created_flows);
+    ok &= expect_true(result.metrics.rx_filtered == 2,
+            "non_tcp_udp_filtered: expected rx_filtered=2, got %llu",
+            result.metrics.rx_filtered);
     ok &= expect_true(result.metrics.spi_forwarded == 0,
             "non_tcp_udp_filtered: expected spi_forwarded=0, got %llu",
             result.metrics.spi_forwarded);

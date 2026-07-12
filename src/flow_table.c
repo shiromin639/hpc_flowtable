@@ -8,6 +8,7 @@
 #include <rte_cycles.h>
 #include <rte_malloc.h>
 #include <rte_lcore.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -114,7 +115,7 @@ flow_table_init(int socket_id)
         goto fail_qsv;
     }
 
-    g_ft_ctx.current_chunk = 0;
+    g_ft_ctx.aging_iter = 0;
     printf("[FlowTable] Init OK: %d hash entries, %u storage slots, LF+RCU, %d aging chunks\n",
            HASH_ENTRIES, g_ft_ctx.storage_entries, AGING_NUM_CHUNKS);
     return 0;
@@ -144,37 +145,87 @@ flow_table_destroy(void)
 void
 flow_table_rcu_register(unsigned int thread_id)
 {
+    if (g_ft_ctx.qsv == NULL)
+        return;
+
     rte_rcu_qsbr_thread_register(g_ft_ctx.qsv, thread_id);
     rte_rcu_qsbr_thread_online(g_ft_ctx.qsv, thread_id);
 }
 
 void
+flow_table_rcu_online(unsigned int thread_id)
+{
+    if (g_ft_ctx.qsv == NULL)
+        return;
+
+    rte_rcu_qsbr_thread_online(g_ft_ctx.qsv, thread_id);
+}
+
+void
+flow_table_rcu_offline(unsigned int thread_id)
+{
+    if (g_ft_ctx.qsv == NULL)
+        return;
+
+    rte_rcu_qsbr_thread_offline(g_ft_ctx.qsv, thread_id);
+}
+
+void
 flow_table_rcu_quiescent(unsigned int thread_id)
 {
+    if (g_ft_ctx.qsv == NULL)
+        return;
+
     rte_rcu_qsbr_quiescent(g_ft_ctx.qsv, thread_id);
 }
 
-uint32_t
+void
+flow_table_rcu_unregister(unsigned int thread_id)
+{
+    if (g_ft_ctx.qsv == NULL)
+        return;
+
+    rte_rcu_qsbr_thread_offline(g_ft_ctx.qsv, thread_id);
+    rte_rcu_qsbr_thread_unregister(g_ft_ctx.qsv, thread_id);
+}
+
+struct flow_aging_result
 flow_table_aging_tick(void)
 {
     uint64_t timeout_cycles = (uint64_t)FLOW_TIMEOUT_SEC * rte_get_tsc_hz();
     uint64_t t_now = rte_rdtsc();
+    struct flow_aging_result result = { 0 };
 
     const void *expired_keys[AGING_BATCH_SIZE];
     uint32_t expired_positions[AGING_BATCH_SIZE];
     uint32_t expired_count = 0;
     uint32_t total_deleted = 0;
-    uint32_t chunk = g_ft_ctx.current_chunk;
+    uint32_t scan_budget;
 
     const void *next_key;
     void *next_data;
-    uint32_t iter = 0;
     int32_t position;
 
-    while ((position = rte_hash_iterate(g_ft_ctx.hash,
-                    &next_key, &next_data, &iter)) >= 0) {
+    scan_budget = (g_ft_ctx.storage_entries + AGING_NUM_CHUNKS - 1) /
+        AGING_NUM_CHUNKS;
+    if (scan_budget == 0)
+        scan_budget = 1;
 
-        if (((uint32_t)position % AGING_NUM_CHUNKS) != chunk)
+    while (result.scanned < scan_budget) {
+        position = rte_hash_iterate(g_ft_ctx.hash,
+                &next_key, &next_data, &g_ft_ctx.aging_iter);
+
+        if (position == -ENOENT) {
+            g_ft_ctx.aging_iter = 0;
+            break;
+        }
+
+        if (position < 0)
+            break;
+
+        result.scanned++;
+
+        if (unlikely((uint32_t)position >= g_ft_ctx.storage_entries))
             continue;
 
         uint64_t last_seen = flow_hot_last_seen_load(&g_ft_ctx.hot[position]);
@@ -184,6 +235,7 @@ flow_table_aging_tick(void)
 
             expired_keys[expired_count++] = next_key;
             expired_positions[expired_count - 1] = (uint32_t)position;
+            result.expired++;
 
             /* Flush batch when buffer full */
             if (expired_count >= AGING_BATCH_SIZE) {
@@ -198,8 +250,8 @@ flow_table_aging_tick(void)
     total_deleted += flush_expired_batch(expired_keys, expired_positions,
             expired_count, t_now, timeout_cycles);
 
-    g_ft_ctx.current_chunk = (chunk + 1) % AGING_NUM_CHUNKS;
-    return total_deleted;
+    result.deleted = total_deleted;
+    return result;
 }
 
 struct flow_table_ctx *

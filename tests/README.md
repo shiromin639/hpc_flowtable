@@ -3,6 +3,7 @@
 Main entry points:
 
 - `flowcore_functional_tests.c`: mentor-facing C functional suite that generates test PCAPs, runs the real `flowcore` binary, and checks stdout counters.
+- `flowcore_unit_tests.c`: fast C unit tests for packet parsing, protocol accounting, and stats rate helpers.
 - `generate_test_assets.py`: creates deterministic PCAP and rule fixtures under `tests/generated/`.
 - `run_functional_tests.py`: runs the software-only regression suite.
 - `run_performance_tests.py`: runs baseline performance scenarios and writes `perf_results.json`.
@@ -17,6 +18,7 @@ Typical workflow:
 
 ```bash
 meson compile -C build flowcore flowcore_functional_tests
+meson test -C build flowcore-unit
 ./build/flowcore_functional_tests
 
 python3 tests/generate_test_assets.py

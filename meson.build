@@ -16,9 +16,11 @@ sources = files(
     'src/main.c',
     'src/app_init.c',
     'src/flow_table.c',
+    'src/flow_packet.c',
     'src/dispatcher.c',
     'src/spi_engine.c',
     'src/worker.c',
+    'src/stats_core.c',
     'src/stats.c'
 )
 
@@ -29,6 +31,17 @@ executable('flowcore',
     dependencies : dpdk_dep,
     install : false
 )
+
+unit_test_exe = executable('flowcore_unit_tests',
+    'tests/flowcore_unit_tests.c',
+    'src/flow_packet.c',
+    'src/stats_core.c',
+    include_directories : inc,
+    dependencies : dpdk_dep,
+    install : false
+)
+
+test('flowcore-unit', unit_test_exe)
 
 functional_test_exe = executable('flowcore_functional_tests',
     'tests/flowcore_functional_tests.c',

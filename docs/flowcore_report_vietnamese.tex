@@ -1,0 +1,748 @@
+% Bao cao tieng Viet cho du an FlowCore DPDK.
+% Goi y bien dich: pdflatex flowcore_report_vietnamese.tex
+% Neu may thieu goi tieng Viet, cai texlive-lang-vietnamese va texlive-latex-extra.
+
+\documentclass[12pt,a4paper]{report}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usetikzlibrary{arrows.meta,positioning,calc}
+
+\geometry{left=3cm,right=2cm,top=2.5cm,bottom=2.5cm}
+\onehalfspacing
+\pgfplotsset{compat=1.18}
+\captionsetup{font=small,labelfont=bf}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.28}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\renewcommand{\contentsname}{Mục lục}
+\renewcommand{\listfigurename}{Danh mục hình vẽ}
+\renewcommand{\listtablename}{Danh mục đồ thị và bảng biểu}
+\renewcommand{\bibname}{Tài liệu tham khảo}
+\renewcommand{\thechapter}{\Roman{chapter}}
+\setcounter{secnumdepth}{0}
+\setcounter{tocdepth}{3}
+
+\lstdefinestyle{codestyle}{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    stringstyle=\color{teal},
+    breaklines=true,
+    frame=single,
+    columns=fullflexible,
+    keepspaces=true,
+    showstringspaces=false
+}
+\lstset{style=codestyle}
+
+\title{
+    \textbf{Báo cáo Mini Project HPC}\\
+    \Large FlowCore: Hệ thống quản lý Flow Table và phân tải luồng hiệu năng cao sử dụng DPDK
+}
+\author{
+    Sinh viên: \textit{[Điền họ tên]}\\
+    Lớp: \textit{[Điền lớp]}\\
+    Giảng viên/Mentor: \textit{[Điền tên]}
+}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\chapter*{Lời mở đầu}
+\addcontentsline{toc}{chapter}{Lời mở đầu}
+
+Trong các hệ thống mạng hiện đại như firewall, load balancer, CGNAT, UPF trong mạng 5G và security gateway, khối xử lý gói tin ở data plane phải đáp ứng đồng thời ba yêu cầu: thông lượng cao, độ trễ thấp và khả năng duy trì trạng thái phiên mạng. Với lưu lượng lớn, cách xử lý gói tin qua network stack của hệ điều hành thường không còn phù hợp vì chi phí ngắt, copy dữ liệu và khóa đồng bộ có thể trở thành điểm nghẽn.
+
+DPDK cung cấp mô hình poll-mode, hugepage, mempool, mbuf và driver user-space để ứng dụng có thể nhận và gửi gói tin trực tiếp từ NIC hoặc từ thiết bị ảo như PCAP PMD. Trên nền đó, đề tài FlowCore tập trung vào bài toán cốt lõi của data plane trạng thái: quản lý Flow Table theo bộ định danh 5-tuple, giữ flow affinity để mọi gói tin của cùng một luồng đi về cùng một worker, giảm lock contention giữa các core và cung cấp thống kê thời gian thực.
+
+Báo cáo này được viết dựa trên yêu cầu trong tài liệu Mini Project HPC FlowTable và đối chiếu với mã nguồn hiện tại của repository. Một số tài liệu thiết kế trong thư mục \texttt{docs/} được dùng làm tham khảo, nhưng phần mô tả kỹ thuật chính ưu tiên hành vi thực tế của mã nguồn mới.
+
+\chapter*{Tóm tắt nội dung và đóng góp}
+\addcontentsline{toc}{chapter}{Tóm tắt nội dung và đóng góp}
+
+Báo cáo trình bày quá trình thiết kế, triển khai và đánh giá hệ thống FlowCore, một pipeline xử lý gói tin dựa trên DPDK với kiến trúc:
+
+\begin{center}
+\texttt{RX -> Dispatcher -> Flow Table -> Worker Ring -> Worker -> SPI -> TX/Drop}
+\end{center}
+
+Các đóng góp chính của phiên bản hiện tại gồm:
+
+\begin{itemize}
+    \item Xây dựng Flow Table dựa trên \texttt{rte\_hash} với chế độ lock-free \texttt{RTE\_HASH\_EXTRA\_FLAGS\_RW\_}\allowbreak\texttt{CONCURRENCY\_LF} và QSBR RCU để hỗ trợ tra cứu/xóa đồng thời.
+    \item Tách dữ liệu flow thành \texttt{hot[]} và \texttt{cold[]} nhằm giảm lượng dữ liệu chạm vào trên đường xử lý nhanh.
+    \item Duy trì flow affinity bằng cách gán worker theo hash của toàn bộ 5-tuple modulo số worker.
+    \item Tổ chức 4 worker, mỗi worker có một ring SP/SC riêng và một TX queue riêng để giảm tranh chấp.
+    \item Bổ sung SPI Rule Engine với cache quyết định theo flow, double-buffer rule table và cơ chế reload bằng \texttt{SIGUSR1}.
+    \item Cung cấp thống kê per-lcore, phân loại HTTP/HTTPS/DNS/TCP/UDP/OTHER, thống kê flow lifecycle, drop và throughput.
+    \item Xây dựng bộ kiểm thử unit, functional bằng PCAP PMD và các kịch bản đo baseline phần mềm.
+\end{itemize}
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+\chapter{Giới thiệu}
+
+\section{Đặt vấn đề}
+
+Trong data plane trạng thái, hệ thống không chỉ chuyển tiếp từng gói tin độc lập mà còn phải ghi nhớ trạng thái luồng. Khi gói đầu tiên của một flow xuất hiện, hệ thống cần phân tích header, tạo bản ghi flow, chọn worker xử lý và lưu ánh xạ đó. Các gói tiếp theo phải được tra cứu nhanh và đưa về đúng worker đã gán. Nếu không bảo toàn flow affinity, gói tin của cùng một kết nối TCP có thể bị xử lý lệch thứ tự, gây suy giảm hiệu năng hoặc sai chính sách.
+
+Vấn đề khó nằm ở chỗ số lượng flow đồng thời có thể rất lớn. Nếu Flow Table dùng khóa toàn cục hoặc nếu mọi worker cùng ghi vào một vùng thống kê chung, cache-line bouncing và lock contention sẽ làm giảm throughput. Do đó, hệ thống cần thiết kế theo hướng phân vùng trách nhiệm, dùng burst processing, dữ liệu cache-friendly và đồng bộ tối thiểu.
+
+\section{Mục tiêu báo cáo}
+
+Báo cáo hướng tới các mục tiêu sau:
+
+\begin{enumerate}
+    \item Trình bày yêu cầu bài toán Flow Table Management theo tài liệu Mini Project HPC.
+    \item Mô tả kiến trúc hiện tại của FlowCore dựa trên mã nguồn.
+    \item Phân tích các cấu trúc dữ liệu và quyết định tối ưu hóa chính.
+    \item Trình bày phương pháp kiểm thử, kết quả đã có và giới hạn của môi trường đánh giá.
+    \item Đưa ra kết luận và hướng phát triển tiếp theo.
+\end{enumerate}
+
+\section{Phạm vi triển khai}
+
+Phiên bản hiện tại tập trung vào IPv4 TCP/UDP, Flow Table 1 triệu entry, 4 worker, PCAP hoặc thiết bị DPDK làm nguồn RX, \texttt{net\_null} hoặc port DPDK làm đầu ra TX. Những chức năng như IPv6, dynamic worker scaling, timing wheel aging, dashboard web và CLI realtime chưa nằm trong phạm vi triển khai chính.
+
+\section{Lưu ý so với yêu cầu gốc}
+
+Tài liệu Mini Project mô tả một số lựa chọn thiết kế ban đầu. Mã nguồn hiện tại có một số điểm khác nhưng hợp lý về mặt kỹ thuật:
+
+\begin{itemize}
+    \item Timeout hiện tại là \texttt{FLOW\_TIMEOUT\_SEC = 1}, không phải 5 giây.
+    \item Worker được chọn bằng hash của toàn bộ 5-tuple modulo \texttt{NUM\_WORKERS}, không phải \texttt{Source IP \% N}. Cách này thường cân bằng hơn khi nhiều flow dùng chung source IP.
+    \item Không có TX thread riêng; mỗi worker trực tiếp gọi \texttt{rte\_eth\_tx\_burst()} trên TX queue tương ứng.
+    \item Dispatcher lọc bỏ non-IPv4 và non-TCP/UDP trước khi đưa gói sang worker, vì vậy bộ đếm OTHER hiện ít được sử dụng trong đường chạy hiện tại.
+\end{itemize}
+
+\chapter{Nội dung và phương pháp}
+
+\section{Tổng quan DPDK trong đề tài}
+
+DPDK được dùng để xây dựng data plane user-space. Các thành phần quan trọng trong đề tài gồm:
+
+\begin{itemize}
+    \item \textbf{EAL}: khởi tạo môi trường runtime, lcore, memory channel và thiết bị.
+    \item \textbf{Hugepage/mempool}: cấp phát vùng nhớ lớn cho \texttt{rte\_mbuf}, giảm overhead cấp phát gói tin.
+    \item \textbf{Poll-mode driver}: nhận/gửi packet bằng \texttt{rte\_eth\_rx\_burst()} và \texttt{rte\_eth\_tx\_burst()} thay vì interrupt path.
+    \item \textbf{Ring}: truyền con trỏ mbuf giữa dispatcher và worker.
+    \item \textbf{\texttt{rte\_hash}}: bảng băm hiệu năng cao dùng để ánh xạ 5-tuple sang chỉ số flow.
+\end{itemize}
+
+\section{Kiến trúc tổng thể}
+
+\begin{figure}[H]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=0.9cm and 1.0cm,
+    box/.style={
+        draw,
+        rounded corners=2pt,
+        minimum width=2.65cm,
+        minimum height=1.05cm,
+        align=center,
+        font=\small
+    },
+    arr/.style={-{Latex[length=2.5mm]}, thick},
+    note/.style={draw, dashed, rounded corners=2pt, align=center, font=\small}
+]
+\node[box] (rx) {RX\\\texttt{rte\_eth\_rx\_burst}};
+\node[box, right=of rx] (disp) {Dispatcher\\parse + bulk lookup};
+\node[box, right=of disp] (ft) {Flow Table\\\texttt{rte\_hash}\\\texttt{hot[]/cold[]}};
+\node[box, right=of ft] (rings) {Worker rings\\SP/SC};
+\node[box, right=of rings] (workers) {Workers\\SPI + stats};
+\node[box, right=of workers] (tx) {TX/Drop\\\texttt{rte\_eth\_tx\_burst}};
+\node[note, below=1.15cm of ft, minimum width=3.2cm, minimum height=0.9cm] (aging) {Stats/Aging\\rule reload + RCU reclaim};
+\draw[arr] (rx) -- (disp);
+\draw[arr] (disp) -- (ft);
+\draw[arr] (ft) -- (rings);
+\draw[arr] (rings) -- (workers);
+\draw[arr] (workers) -- (tx);
+\draw[arr, dashed] (aging.north) -- (ft.south);
+\draw[arr, dashed] (aging.east) -| (workers.south);
+\end{tikzpicture}%
+}
+\caption{Kiến trúc pipeline của FlowCore}
+\label{fig:pipeline}
+\end{figure}
+
+Luồng xử lý bắt đầu từ dispatcher trên main lcore. Dispatcher nhận burst gói tin từ \texttt{PORT\_IN}, trích xuất 5-tuple, tra cứu Flow Table theo batch, tạo flow mới nếu cần và đưa mbuf vào ring của worker đã chọn. Worker dequeue từ ring riêng, kiểm tra SPI rule, cập nhật thống kê giao thức và forward hoặc drop gói. Thread stats/aging chạy định kỳ để in telemetry, reload rule nếu có yêu cầu và xóa flow hết hạn.
+
+\section{Cấu hình chính}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Các tham số cấu hình chính trong mã nguồn hiện tại}
+\label{tab:config}
+\begin{tabularx}{\textwidth}{|L{4.0cm}|C{2.7cm}|Y|}
+\hline
+\textbf{Tham số} & \textbf{Giá trị} & \textbf{Ý nghĩa} \\
+\hline
+\texttt{NUM\_WORKERS} & 4 & Số worker xử lý gói tin \\
+\hline
+\texttt{BURST\_SIZE} & 32 & Số packet tối đa mỗi burst RX/TX/ring \\
+\hline
+\texttt{HASH\_ENTRIES} & 1,048,576 & Số entry Flow Table mục tiêu \\
+\hline
+\texttt{RING\_SIZE} & 4096 & Kích thước ring mỗi worker \\
+\hline
+\texttt{FLOW\_TIMEOUT\_SEC} & 1 & Timeout flow hiện tại \\
+\hline
+\texttt{AGING\_NUM\_CHUNKS} & 8 & Chia nhỏ chu kỳ aging \\
+\hline
+\texttt{AGING\_BATCH\_SIZE} & 1024 & Số key hết hạn gom mỗi batch xóa \\
+\hline
+\texttt{SPI\_MAX\_RULES} & 256 & Số rule SPI tối đa \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Trích xuất 5-tuple}
+
+Module \texttt{src/flow\_packet.c} đọc Ethernet header, kiểm tra IPv4, đọc độ dài IPv4 header, chỉ chấp nhận TCP/UDP và lấy hai port đầu của L4 header. Key được định nghĩa như sau:
+
+\begin{lstlisting}[language=C, caption={Cấu trúc key định danh flow}]
+struct ipv4_5tuple_key {
+    uint32_t ip_src;
+    uint32_t ip_dst;
+    uint16_t port_src;
+    uint16_t port_dst;
+    uint8_t  proto;
+    uint8_t  pad[3];
+} __attribute__((__packed__));
+\end{lstlisting}
+
+Trường \texttt{pad[3]} đưa key lên 16 byte. Điều này phù hợp với đường hash CRC của DPDK và giúp key có layout cố định, dễ xử lý theo batch.
+
+\section{Thiết kế Flow Table}
+
+Flow Table là thành phần trung tâm của hệ thống. Nhiệm vụ của nó là biến một packet đã được parse thành một quyết định xử lý nhanh: packet thuộc flow nào, flow đó đã được gán cho worker nào, thời điểm cuối cùng flow còn hoạt động là khi nào, và quyết định SPI đã cache cho flow là gì. Thiết kế hiện tại không đặt toàn bộ metadata trực tiếp trong hash table. Thay vào đó, hệ thống dùng mô hình hai tầng:
+
+\begin{center}
+\texttt{5-tuple key -> rte\_hash -> flow\_idx -> hot[flow\_idx] + cold[flow\_idx]}
+\end{center}
+
+\begin{figure}[H]
+\centering
+\resizebox{0.96\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.0cm and 1.3cm,
+    box/.style={draw, rounded corners=2pt, minimum width=3.1cm, minimum height=1.0cm, align=center, font=\small},
+    arr/.style={-{Latex[length=2.5mm]}, thick}
+]
+\node[box] (key) {IPv4 5-tuple key\\16 byte};
+\node[box, right=of key] (hash) {\texttt{rte\_hash}\\lock-free lookup};
+\node[box, right=of hash] (idx) {\texttt{flow\_idx}\\key id};
+\node[box, above right=0.7cm and 1.1cm of idx] (hot) {\texttt{hot[flow\_idx]}\\fast-path state};
+\node[box, below right=0.7cm and 1.1cm of idx] (cold) {\texttt{cold[flow\_idx]}\\flow description};
+\draw[arr] (key) -- (hash);
+\draw[arr] (hash) -- (idx);
+\draw[arr] (idx) -- (hot);
+\draw[arr] (idx) -- (cold);
+\end{tikzpicture}%
+}
+\caption{Mô hình lưu trữ hai tầng của Flow Table}
+\label{fig:flowtable_storage}
+\end{figure}
+
+Cách tổ chức này có ba lợi ích. Thứ nhất, \texttt{rte\_hash} chỉ làm nhiệm vụ tra cứu key và trả về chỉ số, còn dữ liệu nghiệp vụ được quản lý trong các mảng tuyến tính do ứng dụng sở hữu. Thứ hai, dispatcher và worker có thể truy cập metadata bằng chỉ số trực tiếp, không cần lấy lại key từ hash table. Thứ ba, dữ liệu được tách theo tần suất truy cập để hạn chế kéo các trường ít dùng vào cache trên hot path.
+
+\subsection{Key 5-tuple}
+
+Key flow gồm địa chỉ IP nguồn, địa chỉ IP đích, port nguồn, port đích và protocol. Trong mã nguồn, key được thêm 3 byte padding để đạt đúng 16 byte. Đây là lựa chọn nhỏ nhưng quan trọng vì đường hash CRC của DPDK làm việc hiệu quả với block dữ liệu có kích thước cố định và căn chỉnh tốt.
+
+\subsection{Cấu trúc metadata hot/cold}
+
+Hai cấu trúc metadata chính của Flow Table được tách theo tần suất truy cập. Phần hot phục vụ đường xử lý nhanh, còn phần cold lưu mô tả đầy đủ của flow để SPI và thống kê sử dụng khi cần.
+
+\begin{lstlisting}[language=C, caption={Dữ liệu hot/cold của flow}]
+struct flow_hot_data {
+    uint64_t last_seen;
+    uint32_t flow_gen;
+    uint32_t action_version;
+    uint8_t  worker_id;
+    uint8_t  spi_action;
+    uint8_t  pad[2];
+};
+
+struct flow_cold_data {
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint8_t  protocol;
+    uint8_t  pad[3];
+    uint64_t create_time;
+};
+\end{lstlisting}
+
+\subsection{Hot data}
+
+\texttt{hot[]} chứa các trường bị chạm thường xuyên trong đường xử lý nhanh. Dispatcher cần \texttt{worker\_id} để route packet sang ring đúng worker và cập nhật \texttt{last\_seen} cho aging. Worker cần \texttt{flow\_gen}, \texttt{spi\_action} và \texttt{action\_version} để kiểm tra metadata còn hợp lệ và tái sử dụng quyết định SPI đã tính trước đó.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Ý nghĩa các trường trong \texttt{struct flow\_hot\_data}}
+\label{tab:hot_data}
+\begin{tabularx}{\textwidth}{|L{3.2cm}|L{3.0cm}|Y|}
+\hline
+\textbf{Trường} & \textbf{Thread chạm chính} & \textbf{Ý nghĩa} \\
+\hline
+\texttt{last\_seen} & Dispatcher, aging & Timestamp TSC của packet hợp lệ gần nhất; dùng để xác định flow hết hạn. \\
+\hline
+\texttt{flow\_gen} & Dispatcher, worker & Số thế hệ của slot; giúp worker phát hiện packet đang giữ \texttt{flow\_idx} cũ sau khi slot bị reuse. \\
+\hline
+\texttt{action\_version} & Worker & Phiên bản rule table tương ứng với quyết định SPI đã cache. \\
+\hline
+\texttt{worker\_id} & Dispatcher & Worker được gán cho flow, bảo đảm flow affinity. \\
+\hline
+\texttt{spi\_action} & Worker & Quyết định SPI đã cache: \texttt{FORWARD}, \texttt{DROP} hoặc \texttt{UNKNOWN}. \\
+\hline
+\end{tabularx}
+\end{table}
+
+\subsection{Cold data}
+
+\texttt{cold[]} chứa dữ liệu mô tả flow: IP, port, protocol và thời điểm tạo. Các trường này không cần cập nhật trên mọi packet. Chúng chủ yếu được dùng khi worker cần match rule SPI hoặc phân loại giao thức để thống kê. Việc giữ bản sao cold data giúp worker tránh parse lại packet trong trường hợp phổ biến, vì dispatcher đã parse 5-tuple ở bước đầu.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Ý nghĩa các trường trong \texttt{struct flow\_cold\_data}}
+\label{tab:cold_data}
+\begin{tabularx}{\textwidth}{|L{3.2cm}|L{3.0cm}|Y|}
+\hline
+\textbf{Trường} & \textbf{Thời điểm dùng} & \textbf{Ý nghĩa} \\
+\hline
+\texttt{src\_ip}, \texttt{dst\_ip} & Tạo flow, SPI & Địa chỉ IPv4 nguồn/đích lấy từ IPv4 header. \\
+\hline
+\texttt{src\_port}, \texttt{dst\_port} & Tạo flow, SPI, stats & Port TCP/UDP nguồn/đích; dùng để nhận diện HTTP, HTTPS, DNS và rule drop/forward. \\
+\hline
+\texttt{protocol} & Tạo flow, SPI, stats & Protocol L4, hiện hỗ trợ TCP và UDP trên dispatcher path. \\
+\hline
+\texttt{create\_time} & Tạo flow, debug/mở rộng & Timestamp TSC lúc flow được tạo; hiện chưa dùng để quyết định hành vi. \\
+\hline
+\end{tabularx}
+\end{table}
+
+\subsection{Context quản lý Flow Table}
+
+\texttt{struct flow\_table\_ctx} gom các đối tượng sống cùng vòng đời với Flow Table: con trỏ hash table, biến QSBR RCU, số slot thật sự mà DPDK hash trả về, hai mảng hot/cold và iterator aging. Giá trị \texttt{storage\_entries} được lấy từ \texttt{rte\_hash\_max\_key\_id()}, sau đó ứng dụng cấp phát \texttt{hot[]} và \texttt{cold[]} theo đúng số slot này. Cách làm này tránh giả định rằng số slot metadata luôn bằng đúng \texttt{HASH\_ENTRIES}.
+
+\begin{lstlisting}[language=C, caption={Context quản lý Flow Table}]
+struct flow_table_ctx {
+    struct rte_hash      *hash;
+    struct rte_rcu_qsbr  *qsv;
+    uint32_t              storage_entries;
+    struct flow_hot_data  *hot;
+    struct flow_cold_data *cold;
+    uint32_t              aging_iter;
+};
+\end{lstlisting}
+
+\subsection{Vòng đời flow slot và generation}
+
+Một slot trong \texttt{hot[]}/\texttt{cold[]} có thể được dùng lại sau khi flow cũ hết hạn. Trong khi đó, một packet của flow cũ có thể đã được dispatcher enqueue vào ring nhưng worker chưa kịp xử lý. Nếu worker chỉ tin vào \texttt{flow\_idx}, nó có thể đọc nhầm cold data của flow mới. Để tránh lỗi này, dispatcher tăng \texttt{flow\_gen} mỗi khi slot được gán cho flow mới và ghi cả \texttt{flow\_idx} lẫn \texttt{flow\_gen} vào metadata của mbuf:
+
+\begin{center}
+\texttt{m->hash.fdir.lo = flow\_idx,\quad m->hash.fdir.hi = flow\_gen}
+\end{center}
+
+Worker chỉ dùng trực tiếp \texttt{hot[]} và \texttt{cold[]} nếu generation trong mbuf trùng với generation hiện tại của slot. Nếu không trùng, worker coi metadata là stale và parse lại packet vào một \texttt{flow\_cold\_data} tạm thời để thực thi SPI an toàn. Như vậy, RCU bảo vệ vòng đời entry bên trong hash table, còn generation bảo vệ ý nghĩa nghiệp vụ của side-array slot.
+
+\section{Cơ chế phân tải và flow affinity}
+
+Với flow mới, dispatcher thêm key vào hash và chọn worker bằng:
+
+\begin{center}
+\texttt{worker\_id = rte\_hash\_hash(key) \% NUM\_WORKERS}
+\end{center}
+
+Vì key bao gồm toàn bộ 5-tuple, mọi packet có cùng 5-tuple sẽ nhận cùng hash và cùng worker. So với công thức \texttt{SourceIP \% N}, cách này giảm rủi ro mất cân bằng khi nhiều kết nối đến từ cùng một địa chỉ nguồn nhưng khác port hoặc địa chỉ đích.
+
+\section{Đường xử lý Dispatcher}
+
+Dispatcher thực hiện các bước:
+
+\begin{enumerate}
+    \item Nhận tối đa 32 gói bằng \texttt{rte\_eth\_rx\_burst()}.
+    \item Lọc packet không hỗ trợ, cập nhật \texttt{rx\_filtered\_pkts}.
+    \item Ghi key hợp lệ vào mảng stack và gọi \texttt{rte\_hash\_lookup\_bulk()}.
+    \item Với flow hit: lấy \texttt{worker\_id}, cập nhật \texttt{last\_seen}.
+    \item Với flow miss: gọi \texttt{rte\_hash\_add\_key()}, khởi tạo hot/cold data, tăng \texttt{flows\_created}.
+    \item Ghi \texttt{flow\_idx} và \texttt{flow\_gen} vào \texttt{m->hash.fdir.lo/hi}.
+    \item Gom packet theo worker và enqueue burst vào ring tương ứng.
+\end{enumerate}
+
+Dispatcher có xử lý duplicate trong cùng một burst. Nếu nhiều packet thuộc cùng một flow mới đều bị lookup miss, packet sau sẽ tái sử dụng kết quả vừa được resolve thay vì add key lặp lại.
+
+\section{Đường xử lý Worker và SPI Rule Engine}
+
+Mỗi worker dequeue từ ring của mình. Worker kiểm tra \texttt{flow\_gen} để xác định metadata còn trỏ đúng flow slot hay không. Nếu hợp lệ, worker dùng \texttt{cold[flow\_idx]} và gọi \texttt{spi\_rule\_engine\_eval()}. Nếu slot đã bị reuse, worker parse lại packet sang \texttt{flow\_cold\_data} tạm thời rồi match SPI trực tiếp.
+
+SPI Rule Engine đọc file \texttt{rules.cfg} với định dạng:
+
+\begin{lstlisting}[caption={Ví dụ file luật SPI}]
+HTTP_ALLOW,TCP,*,*,*,80,FORWARD
+HTTPS_ALLOW,TCP,*,*,*,443,FORWARD
+DNS_ALLOW,UDP,*,*,*,53,FORWARD
+SSH_BLOCK,TCP,*,*,*,22,DROP
+DEFAULT,*,*,*,*,*,FORWARD
+\end{lstlisting}
+
+Các action \texttt{LOG} và \texttt{COUNT} được normalize thành \texttt{FORWARD} để tránh logging đồng bộ trên hot path. Hệ thống hỗ trợ reload runtime bằng \texttt{SIGUSR1}. Rule table dùng double-buffering: rule mới được nạp vào bảng inactive, sau đó con trỏ active được đổi bằng atomic store. Mỗi flow cache \texttt{spi\_action} cùng \texttt{action\_version}; khi version thay đổi, worker revalidate lười biếng trên packet tiếp theo của flow đó.
+
+\section{Các kỹ thuật tối ưu đã sử dụng}
+
+Thiết kế của FlowCore tập trung vào một nguyên tắc chính: hot path chỉ nên làm những việc bắt buộc cho mỗi packet, còn các thao tác đắt hơn như tạo flow, reload rule, aging, reclaim và tổng hợp thống kê phải được đẩy sang slow path hoặc thread nền. Vì vậy, các kỹ thuật tối ưu quan trọng không nằm ở việc thêm nhiều thread, mà nằm ở cách giảm lượng công việc và lượng dữ liệu bị chạm vào trên mỗi packet.
+
+\subsection{Xử lý theo burst và bulk lookup}
+
+DPDK được dùng theo mô hình burst: dispatcher nhận packet bằng \texttt{rte\_eth\_rx\_burst()}, gom các key hợp lệ vào mảng stack, sau đó gọi \texttt{rte\_hash\_lookup\_bulk()} để tra cứu nhiều flow trong một lần. Worker cũng dequeue và TX theo burst. Cách này giảm chi phí gọi API trên từng packet và tận dụng locality của các mảng nhỏ như \texttt{keys[]}, \texttt{positions[]} và \texttt{worker\_buffers[][]}.
+
+Tradeoff của burst processing là độ trễ từng packet có thể tăng nhẹ nếu hệ thống chờ gom batch hoặc nếu burst quá lớn. Trong mã nguồn hiện tại, \texttt{BURST\_SIZE = 32} là lựa chọn cân bằng cho mini project: đủ nhỏ để dễ test, đủ lớn để giảm overhead so với xử lý từng packet. Nếu tối ưu tiếp, có thể benchmark các giá trị 32, 64 hoặc adaptive burst theo workload.
+
+\subsection{Lock-free hash table kết hợp QSBR RCU}
+
+Flow Table dùng \texttt{rte\_hash} với flag \texttt{RTE\_HASH\_EXTRA\_FLAGS\_RW\_}\allowbreak\texttt{CONCURRENCY\_LF}. Mục tiêu là tránh một khóa toàn cục quanh lookup/add/delete. Dispatcher có thể lookup/add flow, trong khi stats/aging thread có thể xóa flow hết hạn. QSBR RCU được gắn vào hash table để trì hoãn reclaim entry đã xóa cho tới khi reader báo quiescent state.
+
+Cần phân biệt rõ phạm vi bảo vệ: RCU bảo vệ vòng đời dữ liệu nội bộ của hash table sau delete, nhưng không tự động bảo vệ ý nghĩa nghiệp vụ của \texttt{hot[]} và \texttt{cold[]}. Vì vậy dự án vẫn cần \texttt{flow\_gen} để worker phát hiện trường hợp mbuf đang giữ \texttt{flow\_idx} cũ nhưng slot side-array đã được flow mới dùng lại.
+
+Tradeoff của hướng này là concurrency phức tạp hơn dùng mutex. Lập trình viên phải register/unregister QSBR đúng, phải báo quiescent state đều, và phải hiểu rằng RCU không thay thế mọi đồng bộ. Alternative đơn giản là dùng global lock hoặc per-bucket lock, nhưng những cách đó dễ trở thành bottleneck trên datapath. Alternative mạnh hơn là tự viết hash table lock-free riêng, nhưng rủi ro cao hơn nhiều so với dùng primitive DPDK đã được tối ưu.
+
+\subsection{Tách metadata hot/cold}
+
+FlowCore không dùng một struct flow lớn chứa tất cả thông tin. Thay vào đó, hash table chỉ trả về \texttt{flow\_idx}, còn metadata nằm trong hai mảng song song: \texttt{hot[]} và \texttt{cold[]}. Phần hot chứa các trường bị chạm thường xuyên như \texttt{last\_seen}, \texttt{flow\_gen}, \texttt{worker\_id}, \texttt{spi\_action} và \texttt{action\_version}. Phần cold chứa IP, port, protocol và \texttt{create\_time}.
+
+Lợi ích chính là dispatcher hit path không cần kéo IP/port/create-time vào cache. Nó chỉ cần biết flow còn sống, worker nào xử lý flow đó và generation hiện tại là gì. Worker chỉ dùng cold data khi cần match SPI hoặc thống kê giao thức. Cách tách này giảm cache pollution và làm rõ nhóm field nào thuộc fast path.
+
+Tradeoff là hệ thống có thêm side arrays ngoài hash table, nên phải kiểm tra \texttt{flow\_idx < storage\_entries} và phải xử lý slot reuse cẩn thận. Nếu dùng một struct duy nhất thì code đơn giản hơn nhưng nhiều trường lạnh sẽ bị kéo vào cache trên đường xử lý nhanh. Nếu padding mỗi flow thành một cache line thì giảm false sharing hơn, nhưng memory footprint ở mức 1M flow sẽ tăng mạnh.
+
+\subsection{Truyền \texttt{flow\_idx}/\texttt{flow\_gen} qua mbuf metadata}
+
+Sau khi dispatcher lookup hoặc tạo flow, nó ghi \texttt{flow\_idx} và \texttt{flow\_gen} vào \texttt{m->hash.fdir.lo} và \texttt{m->hash.fdir.hi}. Worker đọc lại hai giá trị này để truy cập trực tiếp \texttt{hot[]} và \texttt{cold[]}. Nhờ vậy worker không phải parse packet lại và cũng không phải lookup hash lần thứ hai.
+
+Vấn đề của kỹ thuật này là metadata trong mbuf có thể stale. Ví dụ packet của flow A đã nằm trong ring, aging xóa flow A, rồi slot đó được flow B dùng lại. Nếu worker chỉ tin vào \texttt{flow\_idx}, nó có thể đọc nhầm cold data của flow B. Vì vậy \texttt{flow\_gen} là phần bắt buộc của thiết kế: mỗi lần slot được dùng cho flow mới, generation tăng; worker chỉ dùng side arrays nếu generation trong mbuf khớp generation hiện tại. Nếu không khớp, worker parse lại packet sang cold data tạm và match SPI theo slow path.
+
+Alternative là worker lookup hash lại, nhưng như vậy mất lợi ích của dispatcher lookup. Một alternative khác là dùng dynamic mbuf field thay vì \texttt{hash.fdir}; cách đó rõ ownership hơn, nhưng cần thêm bước đăng ký field và làm code phức tạp hơn.
+
+\subsection{SPI action cache và reload theo version}
+
+SPI rule matching tuyến tính qua danh sách rule không nên chạy trên mọi packet. FlowCore cache quyết định SPI trong \texttt{hot[flow\_idx].spi\_action}, kèm \texttt{action\_version}. Nếu rule table chưa đổi, packet sau của cùng flow có thể dùng ngay action đã cache. Khi rule reload, version của rule table tăng; worker thấy version mismatch thì match lại rule cho flow đó và cập nhật cache.
+
+Cơ chế reload dùng double-buffering: một bảng rule đang active, bảng còn lại dùng để load file mới. Sau khi parse thành công, con trỏ active được đổi bằng atomic store. Nếu reload thất bại, hệ thống giữ rule table cũ. Thiết kế này tránh khóa lớn quanh worker và không cần dừng datapath khi thay đổi rule.
+
+Tradeoff là thay đổi rule không áp dụng theo kiểu quét tức thời toàn bộ flow table. Flow cũ sẽ revalidate khi có packet tiếp theo. Nếu chính sách yêu cầu enforcement tức thời tuyệt đối, cần eager invalidation hoặc pause datapath trong lúc đổi rule, nhưng chi phí sẽ lớn hơn. Với rule set lớn, linear match hiện tại cũng là giới hạn; hướng tối ưu tiếp theo là phân nhóm rule theo protocol/port hoặc dùng DPDK \texttt{rte\_acl}.
+
+\subsection{Chunked aging và batch delete}
+
+Aging không quét toàn bộ hash table trong một lần. Stats thread chạy mỗi \texttt{AGING\_INTERVAL\_US}, dùng iterator bền vững và scan khoảng \texttt{storage\_entries / AGING\_NUM\_CHUNKS}. Flow quá timeout được gom vào batch rồi xóa bằng \texttt{rte\_hash\_del\_key()}. Trước khi xóa, code đọc lại \texttt{last\_seen} để tránh xóa flow vừa có packet mới.
+
+Kỹ thuật này giảm spike CPU so với full scan một triệu entry mỗi giây. Tuy nhiên, nó vẫn có chi phí phụ thuộc vào kích thước hash table. Khi scale lên nhiều triệu hoặc chục triệu flow, alternative tốt hơn là timing wheel, expiry bucket hoặc partitioned aging. Các phương án đó giảm chi phí scan nhưng phức tạp hơn vì phải cập nhật hoặc lazy-update vị trí timeout của flow.
+
+\subsection{Per-lcore statistics}
+
+Thống kê được lưu theo lcore bằng \texttt{rte\_lcore\_var}. Dispatcher, worker và stats thread chủ yếu ghi counter của chính lcore mình. Stats thread định kỳ đọc tất cả lcore và cộng dồn. Cách này tránh việc nhiều core cùng atomic increment một counter toàn cục trên mỗi packet, giảm cache-line bouncing.
+
+Tradeoff là snapshot thống kê không tuyệt đối nhất quán tại từng nanosecond, vì stats thread có thể đọc khi worker đang tăng counter. Với telemetry realtime, độ chính xác tuyệt đối kiểu transactional không cần thiết; đổi lại hot path nhẹ hơn. Nếu yêu cầu billing/accounting chính xác tuyệt đối, thiết kế counter phải chặt hơn và sẽ tốn chi phí hơn.
+
+\section{Flow aging và RCU/QSBR}
+
+Aging chạy trong \texttt{stats\_thread()}. Mỗi tick cách nhau \texttt{AGING\_INTERVAL\_US = 1/8} giây. Hàm \texttt{flow\_table\_aging\_tick()} dùng iterator bền vững để scan một phần hash table, kiểm tra:
+
+\begin{center}
+\texttt{t\_now - last\_seen > FLOW\_TIMEOUT\_SEC * rte\_get\_tsc\_hz()}
+\end{center}
+
+Các key hết hạn được gom theo batch rồi xóa bằng \texttt{rte\_hash\_del\_key()}. Hash table được tạo với lock-free concurrency và gắn QSBR RCU. Dispatcher và stats/aging thread đăng ký làm RCU reader, báo quiescent state định kỳ để DPDK có thể reclaim entry đã xóa an toàn.
+
+\begin{figure}[H]
+\centering
+\resizebox{0.90\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.0cm and 1.4cm,
+    box/.style={draw, rounded corners=2pt, minimum width=3.0cm, minimum height=0.9cm, align=center, font=\small},
+    arr/.style={-{Latex[length=2.5mm]}, thick}
+]
+\node[box] (new) {Flow mới};
+\node[box, right=of new] (active) {Active\\update \texttt{last\_seen}};
+\node[box, right=of active] (expired) {Timeout};
+\node[box, below=1.0cm of expired] (deleted) {Delete key\\RCU defer};
+\node[box, left=of deleted] (reclaim) {Reclaim sau\\quiescent state};
+\draw[arr] (new) -- (active);
+\draw[arr] (active) -- (expired);
+\draw[arr] (expired) -- (deleted);
+\draw[arr] (deleted) -- (reclaim);
+\draw[arr] ([yshift=2pt]active.north west) to[out=135,in=45,looseness=5]
+    node[above, font=\small]{packet mới} ([yshift=2pt]active.north east);
+\end{tikzpicture}
+}
+\caption{Vòng đời một flow trong FlowCore}
+\label{fig:flow_lifecycle}
+\end{figure}
+
+\section{Thống kê runtime}
+
+Thống kê được tổ chức theo per-lcore bằng \texttt{rte\_lcore\_var}, tránh dùng counter toàn cục có nhiều writer. Dispatcher cập nhật RX, filtered, ring drop và flow creation. Worker cập nhật TX, SPI, protocol counters và TX drop. Stats thread cộng dồn các lcore mỗi chu kỳ đầy đủ để in:
+
+\begin{itemize}
+    \item RX/TX throughput theo PPS và Mbps.
+    \item Active flows, created flows, deleted/timeout flows.
+    \item Flow creation/deletion rate.
+    \item SPI forwarded/dropped, rule version, revalidation.
+    \item Ring drop, TX drop, hash add failure.
+    \item Aging scan/expire/delete/reclaim rate.
+    \item Protocol counters và chi tiết từng worker.
+\end{itemize}
+
+\chapter{Kết quả thực hiện và đánh giá}
+
+\section{Mức độ hoàn thành chức năng}
+
+{\footnotesize
+\begin{longtable}{|L{4.1cm}|L{6.6cm}|L{3.3cm}|}
+\caption{Đối chiếu yêu cầu và hiện trạng triển khai}
+\label{tab:requirements}\\
+\hline
+\textbf{Yêu cầu} & \textbf{Hiện trạng trong mã nguồn} & \textbf{Đánh giá} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Yêu cầu} & \textbf{Hiện trạng trong mã nguồn} & \textbf{Đánh giá} \\
+\hline
+\endhead
+Khởi tạo DPDK EAL, port, mempool & \texttt{app\_init.c} khởi tạo EAL, port RX/TX, mbuf pool, rings & Hoàn thành \\
+\hline
+Parse Ethernet/IPv4/TCP/UDP & \texttt{flow\_packet.c} trích xuất 5-tuple, xử lý IPv4 header length & Hoàn thành trong phạm vi IPv4 TCP/UDP \\
+\hline
+Flow Table tốc độ cao & \texttt{rte\_hash} lock-free, 1M entry, hot/cold arrays & Hoàn thành \\
+\hline
+Flow affinity & Worker lưu trong \texttt{hot[]} và được lookup lại cho packet cùng flow & Hoàn thành \\
+\hline
+Phân tải 4--8 worker & Hiện cấu hình 4 worker cố định & Hoàn thành mức 4 worker \\
+\hline
+Flow aging/timeout & Stats thread gọi aging tick, xóa batch, RCU reclaim & Hoàn thành, timeout hiện là 1 giây \\
+\hline
+Thống kê realtime & In PPS, Mbps, active flow, drop, protocol, per-worker & Hoàn thành \\
+\hline
+SPI Rule Engine & Rule file, wildcard, FORWARD/DROP, cache action, reload runtime & Hoàn thành phần chính và một phần nâng cao \\
+\hline
+PCAP replay mode & Test/run scripts dùng \texttt{net\_pcap} RX và \texttt{net\_null} TX & Hoàn thành cho môi trường software-only \\
+\hline
+\end{longtable}
+}
+
+\section{Kiểm thử chức năng}
+
+Repository có ba nhóm kiểm thử:
+
+\begin{itemize}
+    \item Unit test C: kiểm tra packet parser, protocol accounting và hàm tính rate.
+    \item Functional test C/Python: sinh PCAP, chạy binary thật, parse stdout để kiểm tra counter.
+    \item Performance smoke test: replay PCAP bằng DPDK virtual devices và lưu kết quả JSON.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Các ca kiểm thử chức năng chính}
+\label{tab:functional_tests}
+\begin{tabularx}{\textwidth}{|L{3.5cm}|Y|L{3.6cm}|}
+\hline
+\textbf{Ca kiểm thử} & \textbf{Mục tiêu} & \textbf{Tín hiệu kiểm tra} \\
+\hline
+Same flow reuse & 10 packet cùng 5-tuple chỉ tạo 1 flow & Created Flows = 1 \\
+\hline
+Unique flow creation & 32 packet khác 5-tuple tạo 32 flow & Created Flows = 32 \\
+\hline
+Rule drop SSH & Gói TCP/22 bị DROP theo rule & SPI Drops = 1 \\
+\hline
+Protocol accounting & Đếm HTTP/HTTPS/DNS/TCP/UDP & Counter khớp kỳ vọng \\
+\hline
+Aging cleanup & Flow idle bị xóa sau timeout & Deleted Flows tăng, Active về 0 \\
+\hline
+Non-TCP/UDP filtered & ICMP/ARP bị lọc ở dispatcher & Không tạo flow, không forward \\
+\hline
+Hot reload & Reload rule runtime bằng \texttt{SIGUSR1} & Rule version tăng, xuất hiện drop sau reload \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Kết quả đo baseline phần mềm}
+
+Các kết quả dưới đây lấy từ các file JSON có sẵn trong thư mục \texttt{pcap/}. Môi trường đo dùng PCAP PMD và \texttt{net\_null}, vì vậy các số liệu này có giá trị so sánh regression phần mềm, chưa đại diện cho line-rate trên NIC thật.
+
+\begin{table}[H]
+\centering
+\small
+\caption{Fixed-packet sweep với 1 triệu packet}
+\label{tab:fixed_sweep}
+\begin{tabular}{|r|r|r|r|r|}
+\hline
+\textbf{Số flow} & \textbf{Best RX PPS} & \textbf{Best TX PPS} & \textbf{Active Flow} & \textbf{TX Drop} \\
+\hline
+10,000 & 9,149,536 & 9,149,504 & 10,000 & 0 \\
+\hline
+100,000 & 8,808,576 & 8,808,608 & 100,000 & 0 \\
+\hline
+1,000,000 & 10,474,336 & 10,471,294 & 1,000,000 & 0 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\small
+\caption{Flow sweep bằng \texttt{net\_pcap} và \texttt{net\_null}}
+\label{tab:pcap_sweep}
+\begin{tabular}{|r|r|r|r|r|}
+\hline
+\textbf{Số flow} & \textbf{Best RX PPS} & \textbf{Best TX PPS} & \textbf{Bộ nhớ} & \textbf{Mbufs} \\
+\hline
+1,000 & 5,156,896 & 3,952,724 & 512 MB & 32,768 \\
+\hline
+10,000 & 5,700,928 & 3,987,980 & 512 MB & 32,768 \\
+\hline
+100,000 & 3,514,752 & 2,727,777 & 1024 MB & 100,000 \\
+\hline
+1,000,000 & 5,151,200 & 181,844 & 2048 MB & 600,000 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    ybar,
+    width=0.92\textwidth,
+    height=6cm,
+    xlabel={Số flow},
+    ylabel={Triệu packet/giây (Mpps)},
+    symbolic x coords={1k,10k,100k,1M},
+    xtick=data,
+    ymin=0,
+    ymax=6.4,
+    bar width=10pt,
+    enlarge x limits=0.20,
+    ymajorgrids=true,
+    grid style={dashed, gray!35},
+    tick label style={font=\small},
+    label style={font=\small},
+    legend style={at={(0.5,-0.20)},anchor=north,legend columns=2,font=\small}
+]
+\addplot coordinates {(1k,5.16) (10k,5.70) (100k,3.51) (1M,5.15)};
+\addplot coordinates {(1k,3.95) (10k,3.99) (100k,2.73) (1M,0.18)};
+\legend{RX PPS,TX PPS}
+\end{axis}
+\end{tikzpicture}
+\caption{So sánh RX/TX PPS trong kịch bản \texttt{net\_pcap} sweep}
+\label{fig:pcap_sweep_chart}
+\end{figure}
+
+\section{Đánh giá kỹ thuật}
+
+Kết quả triển khai cho thấy kiến trúc hiện tại đáp ứng tốt phần lõi của đề tài: flow được tạo và tái sử dụng đúng, worker affinity được duy trì, aging xóa flow idle, SPI rule có thể forward/drop và reload runtime. Việc dùng \texttt{rte\_hash\_lookup\_bulk()}, ring SP/SC và per-lcore counter phù hợp với tư duy data plane hiệu năng cao.
+
+Các điểm mạnh chính:
+
+\begin{itemize}
+    \item Đường xử lý nhanh tránh khóa toàn cục và hạn chế parse lặp lại.
+    \item Hot/cold split giảm dữ liệu không cần thiết trên dispatcher path.
+    \item Flow generation giúp worker phát hiện slot đã bị reuse sau khi aging xóa flow.
+    \item Rule reload không dừng datapath, không cần quét toàn bộ flow để invalidate SPI cache.
+    \item Test harness software-only giúp kiểm thử được trên máy không có NIC DPDK.
+\end{itemize}
+
+Các giới hạn hiện tại:
+
+\begin{itemize}
+    \item Worker count cố định ở compile-time.
+    \item Chưa hỗ trợ IPv6, fragment phức tạp hoặc non-TCP/UDP ở worker path.
+    \item SPI matching hiện là tuyến tính theo số rule; với rule set lớn nên xem xét \texttt{rte\_acl} hoặc indexing theo protocol/port.
+    \item Aging vẫn dựa trên hash iterator; với hàng chục triệu flow có thể cần timing wheel hoặc expiry bucket.
+    \item Kết quả PCAP PMD không thay thế được benchmark với NIC thật hoặc traffic generator.
+\end{itemize}
+
+\chapter{Kết luận}
+
+FlowCore đã triển khai được một pipeline DPDK trạng thái với Flow Table, flow affinity, phân tải worker, SPI rule engine, aging và thống kê realtime. Thiết kế hiện tại thể hiện rõ các nguyên tắc quan trọng của data plane hiệu năng cao: xử lý theo burst, tránh lock trên hot path, dùng cấu trúc dữ liệu cache-friendly, tách dữ liệu hot/cold, dùng per-lcore counter và dùng RCU/QSBR cho vòng đời hash entry.
+
+Về mặt kết quả, bộ kiểm thử hiện tại xác nhận các chức năng chính như tạo/tái sử dụng flow, drop theo rule, protocol accounting, hot reload và aging cleanup. Các số liệu PCAP replay cho thấy hệ thống có thể xử lý ở mức hàng triệu packet/giây trong môi trường phần mềm, đồng thời quản lý tới 1 triệu active flow trong các kịch bản có sẵn.
+
+Hướng phát triển tiếp theo nên tập trung vào:
+
+\begin{enumerate}
+    \item Thêm mode xuất thống kê dạng JSON để phục vụ dashboard và kiểm thử tự động.
+    \item Hỗ trợ worker scaling hoặc ít nhất cấu hình số worker runtime.
+    \item Cải tiến aging bằng timing wheel/lazy expiry khi mục tiêu tăng lên nhiều triệu flow.
+    \item Tối ưu SPI rule matching bằng phân nhóm rule hoặc DPDK ACL.
+    \item Đánh giá trên NIC thật với RSS, NUMA pinning và traffic generator để đo line-rate.
+    \item Bổ sung IPv6 và xử lý các trường hợp packet phức tạp hơn.
+\end{enumerate}
+
+\begin{thebibliography}{99}
+
+\bibitem{miniproject}
+Nguyễn Ngọc Dũng, \textit{Mini Project FlowTable: Hệ thống phân tải luồng và quản lý Flow Table hiệu năng cao sử dụng DPDK}, file \texttt{MiniProject\_HPC\_Flowtable.docx}.
+
+\bibitem{readme}
+Repository FlowCore, \textit{README.md}, mô tả nhanh kiến trúc hiện tại và các module chính.
+
+\bibitem{architecture}
+Repository FlowCore, \textit{docs/project\_architecture.md}, tài liệu kiến trúc triển khai.
+
+\bibitem{cache}
+Repository FlowCore, \textit{docs/cache\_and\_datapath\_explained.md}, phân tích cache và datapath.
+
+\bibitem{spi}
+Repository FlowCore, \textit{docs/spi\_rule\_engine\_design.md}, thiết kế SPI Rule Engine, hot reload và worker statistics.
+
+\bibitem{defense}
+Repository FlowCore, \textit{docs/source\_code\_defense\_guide.md} và \textit{docs/DEFENSE\_GUIDE.md}, tổng hợp giải thích mã nguồn, tối ưu hóa và câu hỏi bảo vệ.
+
+\bibitem{tests}
+Repository FlowCore, \textit{tests/test\_strategy.md}, chiến lược kiểm thử software-only với PCAP PMD.
+
+\bibitem{dpdkprog}
+DPDK Project, \textit{Data Plane Development Kit Programmer's Guide}, \url{https://doc.dpdk.org/guides/}.
+
+\bibitem{dpdkapi}
+DPDK Project, \textit{DPDK API Documentation}, \url{https://doc.dpdk.org/api/}.
+
+\end{thebibliography}
+
+\end{document}
