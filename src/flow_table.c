@@ -563,34 +563,40 @@ flow_table_evict_for_replacement(uint32_t max_cached_attempts,
     }
 
     if (emergency_scan_budget > 0) {
-        uint32_t best_pos = 0;
-        uint64_t oldest_time = (uint64_t)-1;
-        int found = 0;
+        int batch_evicted = 0;
+        for (int b = 0; b < 16; b++) {
+            uint32_t best_pos = 0;
+            uint64_t oldest_time = (uint64_t)-1;
+            int found = 0;
 
-        for (int i = 0; i < 4; i++) {
-            uint32_t pos = rte_rand() % g_ft_ctx.storage_entries;
-            uint64_t last_seen = flow_hot_last_seen_load(&g_ft_ctx.hot[pos]);
-            if (last_seen != 0 && last_seen < oldest_time) {
-                oldest_time = last_seen;
-                best_pos = pos;
-                found = 1;
+            for (int i = 0; i < 4; i++) {
+                uint32_t pos = rte_rand() % g_ft_ctx.storage_entries;
+                uint64_t last_seen = flow_hot_last_seen_load(&g_ft_ctx.hot[pos]);
+                if (last_seen != 0 && last_seen < oldest_time) {
+                    oldest_time = last_seen;
+                    best_pos = pos;
+                    found = 1;
+                }
+            }
+
+            if (found) {
+                memset(&candidate, 0, sizeof(candidate));
+                candidate.key.ip_src = g_ft_ctx.cold[best_pos].src_ip;
+                candidate.key.ip_dst = g_ft_ctx.cold[best_pos].dst_ip;
+                candidate.key.port_src = g_ft_ctx.cold[best_pos].src_port;
+                candidate.key.port_dst = g_ft_ctx.cold[best_pos].dst_port;
+                candidate.key.proto = g_ft_ctx.cold[best_pos].protocol;
+                candidate.position = best_pos;
+                candidate.flow_gen = flow_hot_generation_load(&g_ft_ctx.hot[best_pos]);
+                candidate.last_seen = oldest_time;
+                
+                if (candidate_delete_if_valid(&candidate, now_tsc, 0)) {
+                    batch_evicted++;
+                }
             }
         }
-
-        if (found) {
-            memset(&candidate, 0, sizeof(candidate));
-            candidate.key.ip_src = g_ft_ctx.cold[best_pos].src_ip;
-            candidate.key.ip_dst = g_ft_ctx.cold[best_pos].dst_ip;
-            candidate.key.port_src = g_ft_ctx.cold[best_pos].src_port;
-            candidate.key.port_dst = g_ft_ctx.cold[best_pos].dst_port;
-            candidate.key.proto = g_ft_ctx.cold[best_pos].protocol;
-            candidate.position = best_pos;
-            candidate.flow_gen = flow_hot_generation_load(&g_ft_ctx.hot[best_pos]);
-            candidate.last_seen = oldest_time;
-            
-            if (candidate_delete_if_valid(&candidate, now_tsc, 0))
-                return 1;
-        }
+        if (batch_evicted > 0)
+            return 1;
     }
 
     return 0;
