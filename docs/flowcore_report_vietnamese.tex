@@ -233,7 +233,7 @@ DPDK được chọn vì nó cho phép ứng dụng kiểm soát trực tiếp v
 
 \textbf{Workers.} Worker lấy packet từ ring của mình, kiểm tra \code{flow\_gen} để biết metadata còn hợp lệ hay không, sau đó match SPI rule. Packet bị rule DROP sẽ được free. Packet được FORWARD sẽ được gom thành burst và gửi ra TX queue của worker.
 
-\textbf{Stats/Aging thread.} Thread này không xử lý từng packet. Nó chạy theo chu kỳ để reload rule nếu có tín hiệu, quét aging, xử lý pressure khi Flow Table gần đầy, reclaim entry đã xóa và tổng hợp thống kê từ các lcore.
+\textbf{Stats/Aging thread.} Thread này không xử lý từng packet. Nó chạy theo chu kỳ để reload rule nếu có tín hiệu, quét aging, xử lý pressure khi Flow Table gần đầy, reclaim entry đã xóa và tổng hợp thống kê từ các lcore. Thread này cũng poll stdin không blocking để cung cấp TUI tối giản với các lệnh \code{show statistics}, \code{show worker} và \code{reload rule}.
 
 \textbf{TX/Drop.} Không có TX thread riêng. Mỗi worker tự gửi packet bằng TX queue tương ứng. Nếu TX queue tạm thời chưa nhận thêm packet, worker giữ packet trong pending TX cục bộ và ưu tiên flush phần pending trước khi dequeue thêm packet mới. Chỉ khi pending không thể giữ thêm hoặc khi thoát chương trình mà vẫn còn packet chưa gửi, worker mới free packet và tăng counter TX drop.
 

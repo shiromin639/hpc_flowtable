@@ -8,6 +8,108 @@
 #include <rte_lcore.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/select.h>
+#include <unistd.h>
+
+enum stats_tui_view {
+    STATS_TUI_STATISTICS = 0,
+    STATS_TUI_WORKERS,
+};
+
+static char *
+trim_command(char *line)
+{
+    char *cmd = line;
+    char *end;
+
+    line[strcspn(line, "\r\n")] = '\0';
+    while (*cmd == ' ' || *cmd == '\t')
+        cmd++;
+
+    end = cmd + strlen(cmd);
+    while (end > cmd && (end[-1] == ' ' || end[-1] == '\t')) {
+        end--;
+        *end = '\0';
+    }
+
+    return cmd;
+}
+
+static void
+set_tui_message(char *message, size_t message_len, const char *text)
+{
+    snprintf(message, message_len, "%s", text);
+}
+
+static void
+poll_tui_command(enum stats_tui_view *view, char *message, size_t message_len)
+{
+    static int stdin_closed;
+    struct timeval timeout = { 0, 0 };
+    fd_set readfds;
+    char line[128];
+    char *cmd;
+    int ready;
+
+    if (stdin_closed)
+        return;
+
+    FD_ZERO(&readfds);
+    FD_SET(STDIN_FILENO, &readfds);
+
+    ready = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout);
+    if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &readfds))
+        return;
+
+    if (fgets(line, sizeof(line), stdin) == NULL) {
+        stdin_closed = 1;
+        return;
+    }
+
+    cmd = trim_command(line);
+    if (*cmd == '\0')
+        return;
+
+    if (strcasecmp(cmd, "show statistics") == 0 ||
+        strcasecmp(cmd, "stats") == 0) {
+        *view = STATS_TUI_STATISTICS;
+        set_tui_message(message, message_len, "showing statistics");
+        return;
+    }
+
+    if (strcasecmp(cmd, "show worker") == 0 ||
+        strcasecmp(cmd, "show workers") == 0 ||
+        strcasecmp(cmd, "workers") == 0) {
+        *view = STATS_TUI_WORKERS;
+        set_tui_message(message, message_len, "showing worker details");
+        return;
+    }
+
+    if (strcasecmp(cmd, "reload rule") == 0 ||
+        strcasecmp(cmd, "reload rules") == 0 ||
+        strcasecmp(cmd, "reload") == 0) {
+        spi_rule_engine_request_reload();
+        set_tui_message(message, message_len, "rule reload requested");
+        return;
+    }
+
+    if (strcasecmp(cmd, "help") == 0) {
+        set_tui_message(message, message_len,
+                "commands: show statistics | show worker | reload rule | quit");
+        return;
+    }
+
+    if (strcasecmp(cmd, "quit") == 0 || strcasecmp(cmd, "exit") == 0) {
+        force_quit = 1;
+        set_tui_message(message, message_len, "quit requested");
+        return;
+    }
+
+    set_tui_message(message, message_len,
+            "unknown command; try: show statistics | show worker | reload rule");
+}
 
 int
 stats_thread(__rte_unused void *arg)
@@ -25,6 +127,8 @@ stats_thread(__rte_unused void *arg)
     struct lcore_stats *local_stats = stats_get_current();
     uint64_t prev_tsc = rte_rdtsc();
     uint64_t tsc_hz = rte_get_tsc_hz();
+    enum stats_tui_view tui_view = STATS_TUI_STATISTICS;
+    char tui_message[128] = "commands: show statistics | show worker | reload rule";
 
     flow_table_rcu_register(lcore_id);
 
@@ -38,6 +142,10 @@ stats_thread(__rte_unused void *arg)
         rte_delay_us_sleep(AGING_INTERVAL_US);
         flow_table_rcu_online(lcore_id);
 
+        if (force_quit)
+            break;
+
+        poll_tui_command(&tui_view, tui_message, sizeof(tui_message));
         if (force_quit)
             break;
 
@@ -126,103 +234,123 @@ stats_thread(__rte_unused void *arg)
         uint32_t victim_cache_count = flow_table_victim_cache_count();
 
         printf("\033[1;1H\033[J");
-        printf("================ PERFORMANCE STATS ================\n");
-        printf("RX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n",
-               pps_rx, mbps_rx);
-        printf("TX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n",
-               pps_tx, mbps_tx);
-        printf("Worker Input  : %10"PRIu64" PPS | %10"PRIu64" Pkts\n",
-               worker_pps, totals.worker_rx_pkts);
-        printf("RX Filtered   : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
-               totals.rx_filtered_pkts, filtered_ps);
-        printf("Active Flows  : %10d Flows\n", active_flows);
-        printf("Created Flows : %10"PRIu64" Flows\n", totals.flows_created);
-        printf("Deleted Flows : %10"PRIu64" Flows\n", totals.flows_deleted);
-        printf("Timeout Delete: %10"PRIu64" Flows\n", totals.aging_deleted);
-        printf("Pressure Evict: %10"PRIu64" Flows\n",
-               totals.victim_evicted_flows);
-        printf("Flow Rate     : %10"PRIu64" C/s | %10"PRIu64" D/s\n",
-               cps, dps);
-        printf("Delete Split  : timeout=%"PRIu64"/s evict=%"PRIu64"/s\n",
-               timeout_delete_ps, pressure_evict_ps);
-        printf("SPI Drops     : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
-               totals.spi_pkts_dropped, spi_drop_ps);
-        printf("TX Drops      : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
-               totals.tx_drop_pkts, tx_drop_ps);
-        printf("Ring Drops    : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
-               totals.ring_drop_pkts, ring_drop_ps);
-        printf("Hash Add Fail : %10"PRIu64" Fails | %10"PRIu64" Fails/s\n",
-               totals.hash_add_failures, hash_fail_ps);
-        printf("Flow Pressure : %10s | active=%10d | victim_cache=%6"PRIu32"\n",
-               flow_table_pressure_mode_name(pressure_mode),
-               active_flows, victim_cache_count);
-        printf("Replacement   : attempts=%"PRIu64" success=%"PRIu64
-               " fail=%"PRIu64" evicted=%"PRIu64"\n",
-               totals.replacement_attempts, totals.replacement_success,
-               totals.replacement_failures, totals.victim_evicted_flows);
-        printf("Retry Add     : success=%"PRIu64" fail=%"PRIu64
-               " cache_empty=%"PRIu64"\n",
-               totals.flow_add_retry_success,
-               totals.flow_add_retry_failures, totals.victim_cache_empty);
-        printf("Active Rules  : %10"PRIu32" Rules | %10"PRIu32" Version\n",
-               spi_rule_engine_rule_count(), spi_rule_engine_version());
-        printf("SPI Forwarded : %10"PRIu64" Pkts | %10"PRIu64" Rule Checks\n",
-               totals.spi_pkts_forwarded, totals.spi_rule_checks);
-        printf("Aging         : scan=%"PRIu64"/s timeout_seen=%"PRIu64"/s "
-               "timeout_del=%"PRIu64"/s reclaim=%"PRIu64"/s\n",
-               aging_scan_ps, aging_expire_ps, aging_delete_ps,
-               aging_reclaim_ps);
-        printf("Protocols     : HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64
-               " TCP=%"PRIu64" UDP=%"PRIu64" OTHER=%"PRIu64"\n",
-               totals.http_pkts, totals.https_pkts, totals.dns_pkts,
-               totals.tcp_pkts, totals.udp_pkts, totals.other_pkts);
-        printf("===================================================\n\n");
-
-        printf("================== WORKERS DETAILS ==================\n");
-
-        for (int w = 0; w < NUM_WORKERS; w++) {
-            unsigned int wl = worker_lcore_ids[w];
-            const struct lcore_stats *worker_stats = stats_get_lcore(wl);
-            uint64_t w_rx_pkts = worker_stats->worker_rx_pkts;
-            uint64_t w_tx_pkts = worker_stats->tx_pkts;
-            uint64_t w_tx_bytes = worker_stats->tx_bytes;
-            uint64_t w_spi_drops = worker_stats->spi_pkts_dropped;
-            uint64_t w_tx_drops = worker_stats->tx_drop_pkts;
-            uint64_t w_spi_checks = worker_stats->spi_rule_checks;
-            uint64_t w_in_pps = stats_rate_per_sec(w_rx_pkts,
-                    prev_worker_rx_pkts[w], elapsed_sec);
-            uint64_t w_pps = stats_rate_per_sec(w_tx_pkts,
-                    prev_worker_tx_pkts[w], elapsed_sec);
-            uint64_t w_mbps = stats_mbps(w_tx_bytes,
-                    prev_worker_tx_bytes[w], elapsed_sec);
-            uint64_t w_spi_drop_ps = stats_rate_per_sec(w_spi_drops,
-                    prev_worker_spi_drops[w], elapsed_sec);
-            uint64_t w_tx_drop_ps = stats_rate_per_sec(w_tx_drops,
-                    prev_worker_tx_drops[w], elapsed_sec);
-            uint64_t w_spi_check_ps = stats_rate_per_sec(w_spi_checks,
-                    prev_worker_spi_checks[w], elapsed_sec);
-
-            printf("Worker %-3d lcore %-3u | IN %10"PRIu64" PPS | TX %10"PRIu64" PPS %10"PRIu64" Mbps "
-                   "| SPI_DROP %8"PRIu64"/s | TX_DROP %8"PRIu64"/s | SPI_CHECK %10"PRIu64"/s\n",
-                   w, wl, w_in_pps, w_pps, w_mbps, w_spi_drop_ps,
-                   w_tx_drop_ps, w_spi_check_ps);
-            printf("  HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64
+        if (tui_view == STATS_TUI_STATISTICS) {
+            printf("================ PERFORMANCE STATS ================\n");
+            printf("RX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n",
+                   pps_rx, mbps_rx);
+            printf("TX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n",
+                   pps_tx, mbps_tx);
+            printf("Worker Input  : %10"PRIu64" PPS | %10"PRIu64" Pkts\n",
+                   worker_pps, totals.worker_rx_pkts);
+            printf("RX Filtered   : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
+                   totals.rx_filtered_pkts, filtered_ps);
+            printf("Active Flows  : %10d Flows\n", active_flows);
+            printf("Created Flows : %10"PRIu64" Flows\n", totals.flows_created);
+            printf("Deleted Flows : %10"PRIu64" Flows\n", totals.flows_deleted);
+            printf("Timeout Delete: %10"PRIu64" Flows\n", totals.aging_deleted);
+            printf("Pressure Evict: %10"PRIu64" Flows\n",
+                   totals.victim_evicted_flows);
+            printf("Flow Rate     : %10"PRIu64" C/s | %10"PRIu64" D/s\n",
+                   cps, dps);
+            printf("Delete Split  : timeout=%"PRIu64"/s evict=%"PRIu64"/s\n",
+                   timeout_delete_ps, pressure_evict_ps);
+            printf("SPI Drops     : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
+                   totals.spi_pkts_dropped, spi_drop_ps);
+            printf("TX Drops      : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
+                   totals.tx_drop_pkts, tx_drop_ps);
+            printf("Ring Drops    : %10"PRIu64" Pkts | %10"PRIu64" Pkts/s\n",
+                   totals.ring_drop_pkts, ring_drop_ps);
+            printf("Hash Add Fail : %10"PRIu64" Fails | %10"PRIu64" Fails/s\n",
+                   totals.hash_add_failures, hash_fail_ps);
+            printf("Flow Pressure : %10s | active=%10d | victim_cache=%6"PRIu32"\n",
+                   flow_table_pressure_mode_name(pressure_mode),
+                   active_flows, victim_cache_count);
+            printf("Replacement   : attempts=%"PRIu64" success=%"PRIu64
+                   " fail=%"PRIu64" evicted=%"PRIu64"\n",
+                   totals.replacement_attempts, totals.replacement_success,
+                   totals.replacement_failures, totals.victim_evicted_flows);
+            printf("Retry Add     : success=%"PRIu64" fail=%"PRIu64
+                   " cache_empty=%"PRIu64"\n",
+                   totals.flow_add_retry_success,
+                   totals.flow_add_retry_failures, totals.victim_cache_empty);
+            printf("Active Rules  : %10"PRIu32" Rules | %10"PRIu32" Version\n",
+                   spi_rule_engine_rule_count(), spi_rule_engine_version());
+            printf("SPI Forwarded : %10"PRIu64" Pkts | %10"PRIu64" Rule Checks\n",
+                   totals.spi_pkts_forwarded, totals.spi_rule_checks);
+            printf("Aging         : scan=%"PRIu64"/s timeout_seen=%"PRIu64"/s "
+                   "timeout_del=%"PRIu64"/s reclaim=%"PRIu64"/s\n",
+                   aging_scan_ps, aging_expire_ps, aging_delete_ps,
+                   aging_reclaim_ps);
+            printf("Protocols     : HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64
                    " TCP=%"PRIu64" UDP=%"PRIu64" OTHER=%"PRIu64"\n",
-                   worker_stats->http_pkts,
-                   worker_stats->https_pkts,
-                   worker_stats->dns_pkts,
-                   worker_stats->tcp_pkts,
-                   worker_stats->udp_pkts,
-                   worker_stats->other_pkts);
+                   totals.http_pkts, totals.https_pkts, totals.dns_pkts,
+                   totals.tcp_pkts, totals.udp_pkts, totals.other_pkts);
+            printf("===================================================\n");
+        } else {
+            printf("================== WORKERS DETAILS ==================\n");
 
-            prev_worker_rx_pkts[w] = w_rx_pkts;
-            prev_worker_tx_pkts[w]  = w_tx_pkts;
-            prev_worker_tx_bytes[w] = w_tx_bytes;
-            prev_worker_spi_drops[w] = w_spi_drops;
-            prev_worker_tx_drops[w] = w_tx_drops;
-            prev_worker_spi_checks[w] = w_spi_checks;
+            for (int w = 0; w < NUM_WORKERS; w++) {
+                unsigned int wl = worker_lcore_ids[w];
+                const struct lcore_stats *worker_stats = stats_get_lcore(wl);
+                uint64_t w_rx_pkts = worker_stats->worker_rx_pkts;
+                uint64_t w_tx_pkts = worker_stats->tx_pkts;
+                uint64_t w_tx_bytes = worker_stats->tx_bytes;
+                uint64_t w_spi_drops = worker_stats->spi_pkts_dropped;
+                uint64_t w_tx_drops = worker_stats->tx_drop_pkts;
+                uint64_t w_spi_checks = worker_stats->spi_rule_checks;
+                uint64_t w_in_pps = stats_rate_per_sec(w_rx_pkts,
+                        prev_worker_rx_pkts[w], elapsed_sec);
+                uint64_t w_pps = stats_rate_per_sec(w_tx_pkts,
+                        prev_worker_tx_pkts[w], elapsed_sec);
+                uint64_t w_mbps = stats_mbps(w_tx_bytes,
+                        prev_worker_tx_bytes[w], elapsed_sec);
+                uint64_t w_spi_drop_ps = stats_rate_per_sec(w_spi_drops,
+                        prev_worker_spi_drops[w], elapsed_sec);
+                uint64_t w_tx_drop_ps = stats_rate_per_sec(w_tx_drops,
+                        prev_worker_tx_drops[w], elapsed_sec);
+                uint64_t w_spi_check_ps = stats_rate_per_sec(w_spi_checks,
+                        prev_worker_spi_checks[w], elapsed_sec);
+
+                printf("Worker %-3d lcore %-3u | IN %10"PRIu64" PPS | TX %10"PRIu64" PPS %10"PRIu64" Mbps "
+                       "| SPI_DROP %8"PRIu64"/s | TX_DROP %8"PRIu64"/s | SPI_CHECK %10"PRIu64"/s\n",
+                       w, wl, w_in_pps, w_pps, w_mbps, w_spi_drop_ps,
+                       w_tx_drop_ps, w_spi_check_ps);
+                printf("  HTTP=%"PRIu64" HTTPS=%"PRIu64" DNS=%"PRIu64
+                       " TCP=%"PRIu64" UDP=%"PRIu64" OTHER=%"PRIu64"\n",
+                       worker_stats->http_pkts,
+                       worker_stats->https_pkts,
+                       worker_stats->dns_pkts,
+                       worker_stats->tcp_pkts,
+                       worker_stats->udp_pkts,
+                       worker_stats->other_pkts);
+
+                prev_worker_rx_pkts[w] = w_rx_pkts;
+                prev_worker_tx_pkts[w]  = w_tx_pkts;
+                prev_worker_tx_bytes[w] = w_tx_bytes;
+                prev_worker_spi_drops[w] = w_spi_drops;
+                prev_worker_tx_drops[w] = w_tx_drops;
+                prev_worker_spi_checks[w] = w_spi_checks;
+            }
+            printf("=====================================================\n");
         }
-        printf("=====================================================\n\n");
+
+        if (tui_view != STATS_TUI_WORKERS) {
+            for (int w = 0; w < NUM_WORKERS; w++) {
+                unsigned int wl = worker_lcore_ids[w];
+                const struct lcore_stats *worker_stats = stats_get_lcore(wl);
+
+                prev_worker_rx_pkts[w] = worker_stats->worker_rx_pkts;
+                prev_worker_tx_pkts[w] = worker_stats->tx_pkts;
+                prev_worker_tx_bytes[w] = worker_stats->tx_bytes;
+                prev_worker_spi_drops[w] = worker_stats->spi_pkts_dropped;
+                prev_worker_tx_drops[w] = worker_stats->tx_drop_pkts;
+                prev_worker_spi_checks[w] = worker_stats->spi_rule_checks;
+            }
+        }
+
+        printf("\nTUI: %s\n", tui_message);
+        printf("Commands: show statistics | show worker | reload rule | help | quit\n");
+        printf("flowcore> ");
         fflush(stdout);
 
         prev_totals = totals;

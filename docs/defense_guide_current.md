@@ -1225,7 +1225,7 @@ A: Packet parser giữ IP/port network byte order. Rule parser dùng `inet_pton`
 - Replacement không phải exact LRU.
 - SPI matching tuyến tính mỗi packet; nếu rule lớn nên dùng `rte_acl`.
 - Chưa có metric riêng cho victim stale/drop trong ring; nếu muốn phân tích overload sâu hơn nên bổ sung sau defense.
-- Chưa có interactive CLI; hiện telemetry là màn hình stats định kỳ.
+- TUI hiện chỉ ở mức tối giản trên stdin: `show statistics`, `show worker`, `reload rule`, `help`, `quit`; chưa có dashboard/JSON API.
 - PCAP tests là software-only, không thay thế benchmark NIC line-rate.
 
 ## 18. Câu Kết Thúc Khi Bảo Vệ

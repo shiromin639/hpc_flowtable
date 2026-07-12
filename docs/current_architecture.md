@@ -318,6 +318,7 @@ Stats thread làm nhiều việc nền:
 - Gọi quiescent.
 - Drain RCU deferred reclaim.
 - Mỗi full cycle 8 ticks thì aggregate stats và in console.
+- Poll stdin không blocking để xử lý TUI tối giản: `show statistics`, `show worker`, `reload rule`, `help`, `quit`.
 
 ## 5. Runtime topology
 

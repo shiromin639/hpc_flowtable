@@ -11,7 +11,7 @@ Các file `.c` chính:
 - `src/dispatcher.c`: nhận packet từ RX, parse key, lookup flow table, tạo flow mới nếu cần, rồi route packet sang worker
 - `src/worker.c`: đọc packet từ ring, áp SPI rule, rồi forward/drop
 - `src/flow_table.c`: quản lý hash table, hot/cold flow data, RCU/QSBR, aging
-- `src/stats.c`: chạy stats định kỳ, đồng thời gọi aging và reclaim
+- `src/stats.c`: chạy stats định kỳ, gọi aging/reclaim, và xử lý TUI tối giản (`show statistics`, `show worker`, `reload rule`)
 - `src/spi_engine.c`: parse rules, match rules, reload ruleset
 - `src/app_init.c`: init EAL, port, mempool, ring, launch thread
 
