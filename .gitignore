@@ -52,7 +52,8 @@ src/main
 **/*.md
 !README.md
 !**/README.md
-!docs/current_architecture.md
-!docs/current_optimization.md
-!docs/defense_guide_current.md
-!docs/test_coverage_current.md
+
+# ==========================================
+# 7. Tài liệu local không đưa lên branch main
+# ==========================================
+docs/
