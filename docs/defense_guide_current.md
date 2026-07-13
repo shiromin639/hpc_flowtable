@@ -51,9 +51,10 @@ Trong `include/common.h`:
 
 ```c
 #define NUM_WORKERS     4
-#define RING_SIZE       4096
+#define RING_SIZE       8192
 #define HASH_ENTRIES    (1024 * 1024)
 #define BURST_SIZE      32
+#define TX_RETRY_BUDGET 8
 #define FLOW_TIMEOUT_SEC   5
 #define AGING_NUM_CHUNKS    8
 #define AGING_BATCH_SIZE    1024
@@ -62,8 +63,10 @@ Trong `include/common.h`:
 Ý nghĩa:
 
 - `NUM_WORKERS = 4`: cố định số worker. Phù hợp yêu cầu 4-8 worker, giảm độ phức tạp dynamic scaling.
+- `RING_SIZE = 8192`: số object tối đa trong mỗi ring dispatcher-to-worker. Ring lớn hơn giúp hấp thụ burst/backpressure ngắn hạn nhưng không giải quyết nếu worker/TX chậm kéo dài.
 - `HASH_ENTRIES = 1M`: capacity logic của Flow Table. Replacement không làm vượt quá capacity này; nó chỉ thay state cũ bằng state mới.
 - `BURST_SIZE = 32`: cân bằng throughput và latency; đủ nhỏ để test dễ, đủ lớn để giảm overhead API.
+- `TX_RETRY_BUDGET = 8`: số vòng flush pending TX khi worker drain backlog hoặc shutdown. Runtime normal path còn giữ pending TX cục bộ để giảm drop do TX queue tạm thời đầy.
 - `FLOW_TIMEOUT_SEC = 5`: flow idle quá 5 giây bị aging.
 - `AGING_NUM_CHUNKS = 8`: không scan toàn bộ 1M entry trong một tick; mỗi tick scan khoảng 1/8 table.
 
@@ -152,6 +155,7 @@ Field:
 
 - `last_seen == 0` hiện là marker “slot chưa publish xong”. Dispatcher add key vào hash trước, fill metadata sau, rồi store `last_seen` cuối cùng. Aging/pressure/replacement skip slot có `last_seen == 0`.
 - `flow_gen` không reset runtime. Nếu overflow về 0, helper increment tiếp để tránh generation 0.
+- `worker_id` được ghi khi flow mới được publish và được đọc lại trên flow hit. Vì flow hit không tính lại worker, packet cùng 5-tuple giữ affinity ổn định.
 
 Tradeoff:
 
@@ -187,6 +191,7 @@ Tradeoff:
 
 - Duplicate data với hash key, tốn RAM.
 - Đổi lại worker không phải lookup hash hoặc parse packet trong normal path.
+- `protocol` nằm trong cold data vì dispatcher chỉ cần protocol lúc parse/create, còn worker cần nó cho SPI/protocol accounting. Nếu đưa `protocol` sang hot data, worker có thể đọc nhanh hơn một chút nhưng dispatcher hit path/cache footprint của hot entry tăng; với code hiện tại, protocol không phải field được update trên mỗi packet nên để ở cold hợp lý hơn.
 
 ### `struct flow_table_ctx`
 
@@ -216,6 +221,55 @@ Tại sao aging và pressure có iterator riêng:
 - Aging và pressure maintenance có mục tiêu khác nhau.
 - Nếu dùng chung iterator, pressure scan có thể làm aging bỏ qua vùng hoặc ngược lại.
 - Emergency replacement hiện không dùng iterator; khi victim cache không có candidate hợp lệ, nó dùng bounded random sampling nhỏ.
+
+### Memory layout của Flow Table
+
+Mô hình hiện tại:
+
+```text
+ipv4_5tuple_key -> rte_hash -> position
+position        -> hot[position] + cold[position]
+```
+
+`rte_hash` chỉ làm nhiệm vụ map key sang key id/position. App tự quản lý state trong `hot[]` và `cold[]`.
+
+Vì sao dùng side arrays thay vì `rte_hash_add_key_data()` / companion pointer:
+
+- `rte_hash_add_key_data()` có thể gắn `void *data` vào key, nhưng nó chuyển vấn đề sang lifetime của pointer. Nếu packet đang in-flight giữ pointer cũ mà flow bị delete/reuse, cần RCU/refcount/mempool discipline rất chặt để tránh dangling pointer.
+- Side arrays dùng `position` ổn định do hash trả về. Packet chỉ giữ `flow_idx + flow_gen`, không giữ pointer tới object có thể bị free.
+- `flow_gen` biến stale index thành check rẻ: nếu slot đã được flow khác dùng lại, generation đổi và worker fallback parse packet.
+- Arrays được allocate một lần theo `storage_entries`; không có malloc/free per-flow trên hot path.
+- Tách `hot[]` và `cold[]` giúp dispatcher hit path chủ yếu chạm `last_seen`, `worker_id`, `flow_gen`, không kéo toàn bộ IP/port/create_time vào cùng một object lớn.
+
+Tradeoff:
+
+- Side arrays phải xử lý publish order, `last_seen == 0`, `flow_gen` và snapshot cold-data cẩn thận.
+- Companion pointer có thể làm code lookup nhìn trực tiếp hơn, nhưng không tự giải quyết stale metadata; nó cần generation/refcount/RCU tương đương ở layer object.
+
+### Publish order và memory model
+
+Khi tạo flow mới, dispatcher làm theo thứ tự:
+
+```text
+rte_hash_add_key()
+flow_hot_generation_next()
+fill cold[]
+set worker_id
+store last_seen cuối cùng
+```
+
+Ý nghĩa của từng bước:
+
+- Sau `rte_hash_add_key()`, key có thể đã visible với aging/pressure scan, nhưng side arrays chưa chắc đã fill xong.
+- `flow_gen` tăng trước khi overwrite `cold[]` để packet cũ đang giữ generation cũ không đọc nhầm metadata của flow mới.
+- `last_seen` được store cuối và đóng vai trò publish marker. Maintenance path skip slot `last_seen == 0`, nên không chọn victim khi slot mới add nhưng metadata chưa publish xong.
+- `last_seen` dùng relaxed load/store vì nó là timestamp telemetry/policy và được recheck trước delete. `flow_gen` dùng acquire load và seq_cst increment để làm guard mạnh hơn quanh slot reuse.
+
+Điểm cần nói thẳng:
+
+- QSBR RCU bảo vệ lifecycle bên trong `rte_hash`; nó không tự bảo vệ side arrays.
+- `flow_gen` là semantic guard cho `hot[]/cold[]`.
+- Nếu muốn strict hơn theo C memory model cho mọi kiến trúc, có thể nâng thành seqlock/generation protocol rõ release/acquire quanh toàn bộ `cold[]` copy, hoặc dùng inflight refcount. Project hiện chọn cách nhẹ hơn vì mục tiêu là hot path đơn giản và phù hợp môi trường DPDK/x86 thực nghiệm.
 
 ### `struct flow_aging_result`
 
@@ -259,6 +313,29 @@ Tradeoff:
 
 - Watermark policy dễ hiểu, dễ test.
 - Không phải exact LRU; có thể evict flow chưa phải “ít dùng nhất”.
+
+### `struct flow_pressure_result`
+
+```c
+struct flow_pressure_result {
+    uint32_t scanned;
+    uint32_t candidates;
+    uint32_t evicted;
+    uint32_t stale;
+};
+```
+
+Ý nghĩa:
+
+- `scanned`: số entry đã iterate trong pressure scan.
+- `candidates`: số candidate đã push thành công vào victim cache.
+- `evicted`: số flow delete trực tiếp thành công trong pressure maintenance.
+- `stale`: số candidate đủ điều kiện lúc collect nhưng fail ở bước validate/delete.
+
+Vì sao cần phân biệt:
+
+- Pressure scan không chỉ xóa flow; nó còn chuẩn bị victim cache cho dispatcher.
+- `stale` là dấu hiệu concurrency bình thường: flow có thể vừa được update, bị delete trước, hoặc slot đã reuse trước khi validate.
 
 ### `struct flow_victim_candidate`
 
@@ -328,7 +405,7 @@ Lưu ý về semantics runtime:
 - `flows_deleted`: tổng flow bị xóa từ timeout hoặc pressure/replacement.
 - `aging_expired`: số flow timeout được phát hiện ở vòng scan đầu, chưa chắc đã delete thành công.
 - `aging_deleted`: số flow timeout delete thành công sau bước recheck.
-- `victim_evicted_flows`: số flow bị evict do pressure/replacement.
+- `victim_evicted_flows`: số flow bị evict do pressure maintenance, cộng thêm số lần dispatcher replacement thành công. Lưu ý nhỏ: dispatcher hiện tăng counter này theo event thành công, không cộng đúng `evicted` nếu một call cached replacement xóa được nhiều hơn 1 victim.
 
 Tradeoff per-lcore stats:
 
@@ -421,15 +498,22 @@ Lý do:
 
 Dispatcher:
 
-1. `rte_hash_lookup_bulk()` trả `flow_idx >= 0`.
-2. Check `flow_idx < storage_entries`.
-3. Đọc `target_worker = hot[flow_idx].worker_id`.
-4. Load `flow_gen`.
-5. Store `last_seen = current_tsc`.
-6. Ghi metadata vào mbuf:
+1. Dispatcher parse các packet hợp lệ trong burst vào `keys[]` và `key_ptrs[]`.
+2. Gọi một lần `rte_hash_lookup_bulk(ft->hash, key_ptrs, valid_pkts, positions)`.
+3. Với packet có `positions[i] >= 0`, check `flow_idx < storage_entries`.
+4. Đọc `target_worker = hot[flow_idx].worker_id`.
+5. Load `flow_gen`.
+6. Store `last_seen = current_tsc`.
+7. Ghi metadata vào mbuf:
    - `m->hash.fdir.lo = flow_idx`
    - `m->hash.fdir.hi = flow_gen`
-7. Đưa mbuf vào buffer của worker.
+8. Đưa mbuf vào buffer của worker.
+
+Lý do dùng `lookup_bulk()`:
+
+- Dispatcher đã nhận packet theo burst, nên lookup nhiều key một lần giảm overhead gọi API.
+- `positions[]` trả về index trực tiếp để đọc `hot[]/cold[]`.
+- Code vẫn xử lý từng packet sau bulk lookup để update `last_seen`, route worker và account duplicate miss.
 
 Worker:
 
@@ -457,6 +541,11 @@ Dispatcher:
 7. Set `hot[flow_idx].worker_id`.
 8. Store `last_seen` cuối cùng để publish slot.
 9. Tăng `flows_created`.
+
+Trong source, các bước 3-8 nằm trong `publish_new_flow()`:
+
+- Function này chỉ publish side-array metadata sau khi hash add thành công.
+- Nếu `flow_idx` vượt `storage_entries`, function fail, dispatcher tăng `hash_add_failures`, free mbuf và không enqueue packet.
 
 Tại sao `last_seen` được store cuối:
 
@@ -486,6 +575,8 @@ Dispatcher:
 
 - Hệ thống cố nhận flow mới bằng stateful replacement.
 - Nếu vẫn fail, nghĩa là capacity/reclaim/pressure không theo kịp hoặc table thật sự quá tải. Không có magic để chứa hơn capacity state cùng lúc.
+- `replacement_success` trong stats chỉ nghĩa là evict được ít nhất một victim. Nó không đồng nghĩa flow mới chắc chắn add thành công. Để biết add lại có thành công không, nhìn `flow_add_retry_success` và `flow_add_retry_failures`.
+- Nếu replacement fail hoặc retry add vẫn fail, packet hiện tại bị `rte_pktmbuf_free(m)` ngay tại dispatcher. Drop kiểu này không phải `TX Drops` hoặc `Ring Drops`; nó biểu hiện qua `Hash Add Fail` và `Retry Add fail`.
 
 ### Case E: same-burst duplicate miss
 
@@ -607,20 +698,34 @@ Trigger: stats thread gọi `flow_table_aging_tick()`.
 Flow:
 
 1. Tính `timeout_cycles = FLOW_TIMEOUT_SEC * rte_get_tsc_hz()`.
-2. Scan tối đa `storage_entries / AGING_NUM_CHUNKS`.
-3. Với entry quá timeout, lưu `next_key` và `position` vào batch.
-4. Khi batch full hoặc cuối tick, gọi `flush_expired_batch()`.
-5. `flush_expired_batch()` recheck:
+2. Lấy `t_now = rte_rdtsc()`.
+3. Tính `scan_budget = ceil(storage_entries / AGING_NUM_CHUNKS)`.
+4. Iterate hash bằng `rte_hash_iterate()` từ `aging_iter`, không scan lại từ đầu mỗi tick.
+5. Nếu iterator trả `-ENOENT`, reset `aging_iter = 0` để vòng sau bắt đầu lại từ đầu.
+6. Với entry quá timeout, lưu `next_key` và `position` vào batch `expired_keys[]/expired_positions[]`.
+7. Khi batch full (`AGING_BATCH_SIZE`) hoặc cuối tick, gọi `flush_expired_batch()`.
+8. `flush_expired_batch()` recheck:
    - position valid
    - `last_seen != 0`
    - vẫn quá timeout
-6. Delete bằng `rte_hash_del_key()`.
-7. Stats thread quiescent rồi reclaim bằng `flow_table_reclaim()`.
+9. Delete bằng `rte_hash_del_key()`.
+10. Stats thread báo quiescent rồi reclaim bằng `flow_table_reclaim()`.
 
 Vì sao recheck:
 
 - Dispatcher có thể update `last_seen` giữa scan và delete.
 - Không recheck sẽ xóa nhầm active flow.
+- Flow có thể đã bị pressure/replacement delete trước khi batch flush.
+
+Vì sao batch delete:
+
+- Không delete từng entry ngay trong vòng iterate chính, giảm chi phí lặp lại và gom việc kiểm tra lại vào một chỗ.
+- `AGING_BATCH_SIZE = 1024` giới hạn memory stack tạm và tránh một tick giữ quá nhiều key expired.
+
+Điểm cần nhớ:
+
+- Aging chỉ delete key khỏi `rte_hash`; side arrays không free per-entry.
+- Slot side-array có thể được flow mới reuse sau khi hash reclaim xong; `flow_gen` bảo vệ packet cũ đang giữ `flow_idx`.
 
 ### Replacement delete
 
@@ -690,6 +795,27 @@ Tradeoff:
 
 - Budget mục tiêu là `active_flows - target_92%`. Số flow xóa thực tế có thể thấp hơn vì còn phụ thuộc scan budget, min-idle policy và candidate hợp lệ. Code hiện không cap riêng theo mode; mode ảnh hưởng scan budget và min idle.
 
+Flow trong `flow_table_pressure_maintenance()`:
+
+1. Nếu mode là `NORMAL` hoặc hash chưa init thì return result rỗng.
+2. Tính `scan_budget`, `evict_budget`, `min_idle_cycles`.
+3. Iterate hash bằng `pressure_iter`, tách khỏi `aging_iter`.
+4. Với mỗi entry, gọi `candidate_collect_if_eligible()`:
+   - position phải nhỏ hơn `storage_entries`
+   - `last_seen != 0`
+   - nếu `min_idle_cycles > 0`, flow phải idle đủ lâu
+   - candidate lưu key, position, generation, last_seen
+5. Nếu `result.evicted < evict_budget`, gọi `candidate_delete_if_valid()` để delete trực tiếp.
+6. Nếu đã hết evict budget, push candidate vào victim cache cho dispatcher dùng khi add fail.
+7. Nếu iterator hết table, reset `pressure_iter = 0`.
+
+Ý nghĩa policy:
+
+- Pressure maintenance vừa có vai trò “giảm active count về target 92%” vừa có vai trò “chuẩn bị victim cache”.
+- Ở `PRESSURE` và `AGGRESSIVE`, policy ưu tiên flow đã idle một phần timeout.
+- Ở `CRITICAL`, `min_idle_cycles = 0`, nên published flow nào hợp lệ cũng có thể bị chọn nếu cần tạo khoảng trống.
+- Đây là idle-first/bounded-scan policy, không phải exact LRU.
+
 ### Victim cache
 
 Pressure maintenance làm hai việc:
@@ -702,6 +828,20 @@ Lý do:
 - Dispatcher không nên scan nhiều trên RX hot path.
 - Stats thread đang là maintenance/control plane, phù hợp hơn để scan.
 
+Chi tiết implementation:
+
+- Khi push vào ring, code không enqueue cả `struct flow_victim_candidate`.
+- Nó pack `position` và `flow_gen` vào một object 64 bit:
+  - high 32 bit: position
+  - low 32 bit: generation
+- Khi pop, dispatcher dựng lại candidate bằng `candidate_load_slot(position)`, rồi override `flow_gen` bằng generation đã lưu trong ring.
+
+Tại sao phải validate lại:
+
+- Candidate có thể stale vì flow đã bị aging/pressure delete.
+- Slot có thể đã được flow mới dùng lại.
+- `cold[position]` có thể đã đổi, nên delete chỉ được phép nếu lookup key hiện tại vẫn trả đúng position và generation vẫn khớp.
+
 ### Dispatcher replacement path
 
 `dispatcher_evict_for_replacement()`:
@@ -711,16 +851,30 @@ Lý do:
 - Gọi `flow_table_evict_for_replacement(FLOW_REPLACEMENT_RETRIES, FLOW_EMERGENCY_SCAN_BUDGET)`.
 - Nếu success:
   - tăng `replacement_success`
-  - tăng `victim_evicted_flows`
-  - tăng `flows_deleted`
+  - tăng `victim_evicted_flows` thêm 1 event thành công
+  - tăng `flows_deleted` thêm 1 event thành công
   - quiescent
   - reclaim `FLOW_RECLAIM_REPLACEMENT_BUDGET`
 - Nếu fail: `replacement_failures++`.
+
+Lưu ý về counter:
+
+- `flow_table_evict_for_replacement()` có thể return số cached victim đã delete được.
+- `dispatcher_evict_for_replacement()` hiện chỉ dùng kết quả này như boolean thành công/thất bại và tăng `victim_evicted_flows`/`flows_deleted` thêm 1.
+- Vì vậy telemetry replacement đủ tốt để chứng minh replacement chạy, nhưng nếu muốn đếm chính xác từng victim bị xóa trong dispatcher path thì cần sửa counter thành `+= evicted`.
 
 Tradeoff:
 
 - Có thêm work trên flow miss/add fail, nhưng không ảnh hưởng flow hit.
 - Emergency scan hiện là bounded random sampling nhỏ nên không đảm bảo luôn tìm victim, nhưng tránh latency spike.
+- `FLOW_EMERGENCY_SCAN_BUDGET` hiện chỉ bật/tắt emergency path trong implementation; code sample cố định 16 vòng, mỗi vòng thử 4 random position và chọn slot có `last_seen` nhỏ nhất trong 4 mẫu.
+- Nếu cache và emergency đều không evict được, dispatcher không spin vô hạn; packet flow mới bị free để bảo vệ latency của pipeline.
+
+Điểm phải nói khi bảo vệ:
+
+- Replacement là thật vì gọi `rte_hash_del_key()` và reclaim, không chỉ tăng counter.
+- Nhưng replacement không làm Flow Table chứa được hơn capacity. Nó chỉ hy sinh state cũ để nhận state mới.
+- Khi workload có nhiều hơn capacity flow active thật sự, sẽ có churn: flow cũ bị evict, nếu quay lại thì add lại như flow mới.
 
 ## 10. Concurrency Model
 
@@ -748,20 +902,65 @@ Tradeoff:
 - SP/SC rings: matches one dispatcher producer, one worker consumer.
 - Worker không register QSBR trong code hiện tại vì worker không lookup/delete `rte_hash`; worker chỉ đọc side arrays qua `flow_idx/flow_gen` và dựa vào generation + snapshot để bảo vệ semantic slot reuse.
 
+### QSBR lifecycle theo thread
+
+Dispatcher:
+
+- Gọi `flow_table_rcu_register(lcore_id)` khi thread bắt đầu.
+- Trong vòng RX, nếu không nhận packet (`nb_rx == 0`) thì gọi `flow_table_rcu_quiescent(lcore_id)`.
+- Sau mỗi burst xử lý xong cũng gọi `flow_table_rcu_quiescent(lcore_id)`.
+- Khi thoát, gọi `flow_table_rcu_unregister(lcore_id)`.
+
+Stats/Aging thread:
+
+- Register QSBR khi bắt đầu.
+- Trước khi sleep, gọi `flow_table_rcu_offline(lcore_id)` để không giữ một reader đang ngủ.
+- Sau sleep, gọi `flow_table_rcu_online(lcore_id)`.
+- Sau aging/pressure maintenance, gọi `flow_table_rcu_quiescent(lcore_id)`.
+- Sau đó gọi `flow_table_reclaim(1024)` để reclaim các hash entry đã delete.
+
+Dispatcher replacement path:
+
+- Khi add fail và evict được victim, dispatcher gọi `flow_table_rcu_quiescent(lcore_id)`.
+- Sau đó gọi `flow_table_reclaim(FLOW_RECLAIM_REPLACEMENT_BUDGET)` để cố reclaim một phần ngay trước retry add.
+- Mục tiêu là tăng xác suất `rte_hash_add_key()` retry thành công mà không chờ tick stats tiếp theo.
+
+Worker:
+
+- Worker không register QSBR vì worker không lookup/iterate/delete `rte_hash`.
+- Worker chỉ dùng `flow_idx/flow_gen` và side-array snapshot. Safety của worker đến từ generation check, không phải từ hash RCU.
+
 ### RCU bảo vệ gì và không bảo vệ gì
 
 RCU bảo vệ:
 
 - Internal hash key/data reclaim sau delete.
 - Reader không đọc memory hash đã free khi chưa quiescent.
+- Cho phép stats thread/delete path gọi `rte_hash_del_key()` trước, còn reclaim physical/internal hash resource sau grace period.
 
 RCU không bảo vệ:
 
 - Ý nghĩa của `hot[flow_idx]` và `cold[flow_idx]`.
 - Packet cũ trong ring đang giữ `flow_idx`.
 - Slot side-array bị reuse cho flow khác.
+- Việc worker đọc `cold[]` trong khi dispatcher có thể publish flow mới vào cùng slot.
 
 Vì vậy cần `flow_gen` và worker snapshot. Đây là câu trả lời quan trọng nếu hội đồng hỏi “đã có RCU rồi sao còn generation?”.
+
+### How aging/replacement phối hợp với QSBR
+
+1. Aging hoặc replacement gọi `rte_hash_del_key()` để xóa key khỏi hash namespace.
+2. Từ thời điểm này, lookup mới của key đó sẽ miss hoặc không thấy entry cũ.
+3. DPDK hash chưa nhất thiết reclaim ngay internal entry vì có thể còn reader đang ở trong vùng đọc.
+4. Dispatcher/stats báo quiescent để xác nhận đã qua điểm đọc an toàn.
+5. `flow_table_reclaim()` gọi `rte_hash_rcu_qsbr_dq_reclaim()` để reclaim deferred entries.
+6. Sau reclaim, `rte_hash_add_key()` có khả năng reuse slot/key id cho flow mới.
+
+Điểm giới hạn:
+
+- QSBR không biết packet đang nằm trong worker ring.
+- Vì vậy packet in-flight vẫn có thể mang `flow_idx` cũ sau khi hash entry đã delete/reclaim.
+- Đây chính là lý do worker phải kiểm tra `flow_gen` trước/sau copy `cold[]`.
 
 ## 11. SPI Engine: Giữ Đơn Giản
 
@@ -811,6 +1010,24 @@ Double-buffer reload:
 - Table còn lại inactive để parse file mới.
 - Parse thành công thì atomic store pointer sang inactive.
 - Parse fail thì giữ active cũ.
+
+Luồng reload đúng theo source:
+
+1. Reload được request bằng `SIGUSR1` hoặc lệnh TUI `reload rule`.
+2. Signal handler/TUI chỉ set cờ qua `spi_rule_engine_request_reload()`, không parse file ngay trên signal handler hoặc worker hot path.
+3. Stats thread mỗi tick gọi `spi_rule_engine_reload_if_needed()`.
+4. Hàm này dùng atomic exchange để đọc và reset `g_reload_requested`.
+5. Nếu không có request thì return ngay.
+6. Nếu có request, stats thread load active table hiện tại, chọn table còn lại làm inactive.
+7. `load_rule_file()` parse lại file rule vào inactive table. Nếu file lỗi, active pointer không đổi và rule cũ tiếp tục chạy.
+8. Nếu parse thành công, version mới bằng version cũ + 1, rồi atomic store active pointer sang inactive table.
+9. Worker ở packet sau sẽ load active pointer mới bằng acquire và match theo rule mới.
+
+Tradeoff reload:
+
+- Reload không block dispatcher/worker để đọc file, vì file I/O nằm trong stats thread.
+- Không cấp phát/free table động; hai bảng rule tĩnh giúp tránh dangling pointer do free.
+- Double-buffer hiện chưa có grace period riêng trước khi tái sử dụng bảng cũ ở lần reload kế tiếp. Với reload thưa trong demo là ổn; nếu production cho phép reload liên tục, nên thêm RCU/grace period hoặc nhiều generation buffer hơn.
 
 Worker matching:
 
@@ -912,13 +1129,35 @@ Nếu bị hỏi endian:
 
 ### `flow_table_init()`
 
-- Reset global context và victim cache.
-- Tạo `rte_hash`.
-- Lấy `storage_entries`.
-- Allocate `hot[]`, `cold[]`, `qsv`.
-- Init QSBR.
-- Attach QSBR vào hash.
-- Reset iterators.
+Luồng khởi tạo đúng theo `src/flow_table.c`:
+
+1. `memset(&g_ft_ctx, 0, sizeof(g_ft_ctx))` để reset context toàn cục.
+2. Nếu `g_victim_ring` cũ tồn tại thì free, sau đó tạo lại `victim_ring` với `FLOW_VICTIM_CACHE_SIZE` và flag `RING_F_SP_ENQ | RING_F_SC_DEQ`.
+3. Tạo `rte_hash`:
+   - `entries = HASH_ENTRIES`
+   - `key_len = sizeof(struct ipv4_5tuple_key)`
+   - `hash_func = rte_hash_crc`
+   - `extra_flag = RTE_HASH_EXTRA_FLAGS_RW_CONCURRENCY_LF | RTE_HASH_EXTRA_FLAGS_EXT_TABLE`
+4. Gọi `rte_hash_max_key_id()` rồi set `storage_entries = max_key_id + 1`. Đây là số slot thật để allocate side arrays, không tự giả định bằng `HASH_ENTRIES`.
+5. Allocate `hot[]` bằng `rte_zmalloc_socket()`, align `RTE_CACHE_LINE_SIZE`, theo `socket_id`.
+6. Allocate `cold[]` tương tự.
+7. Tính size QSBR bằng `rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE)`, allocate `qsv`.
+8. Gọi `rte_rcu_qsbr_init(qsv, RTE_MAX_LCORE)`.
+9. Attach QSBR vào hash bằng `rte_hash_rcu_qsbr_add()` với:
+   - `mode = RTE_HASH_QSBR_MODE_DQ`
+   - `dq_size = RCU_DQ_SIZE`
+10. Reset `aging_iter` và `pressure_iter`.
+
+Memory model khi init:
+
+- `hot[]` và `cold[]` là zeroed memory, nên `last_seen == 0` cho mọi slot lúc mới khởi động.
+- `last_seen == 0` nghĩa là slot chưa publish, nhờ đó aging/pressure không động vào slot chưa được dispatcher hoàn tất metadata.
+- `rte_hash` chỉ giữ key/index; side arrays sống cùng vòng đời Flow Table và chỉ bị free trong `flow_table_destroy()`.
+
+Failure path:
+
+- Nếu bất kỳ allocation/init nào fail, code free các tài nguyên đã cấp phát trước đó rồi return `-1`.
+- Điều này tránh half-initialized Flow Table, nhưng hiện log lỗi chỉ dùng `printf`, chưa có error code chi tiết cho từng loại lỗi.
 
 ### `flow_table_aging_tick()`
 
@@ -1223,7 +1462,10 @@ A: Packet parser giữ IP/port network byte order. Rule parser dùng `inet_pton`
 - IPv4 TCP/UDP only; ICMP/IPv6/VLAN chưa xử lý.
 - Aging vẫn scan hash chunk, chưa dùng timing wheel.
 - Replacement không phải exact LRU.
+- `flow_table_init()` chưa fail-fast nếu tạo `victim_ring` thất bại; khi đó victim cache không hoạt động, dispatcher vẫn còn emergency sampling nhưng replacement kém hiệu quả hơn.
+- Counter `victim_evicted_flows` ở dispatcher replacement hiện đếm theo event thành công, chưa đếm exact số victim nếu một lần pop cache xóa được nhiều flow.
 - SPI matching tuyến tính mỗi packet; nếu rule lớn nên dùng `rte_acl`.
+- SPI reload dùng hai buffer tĩnh và chưa có grace period riêng cho reload liên tiếp rất nhanh.
 - Chưa có metric riêng cho victim stale/drop trong ring; nếu muốn phân tích overload sâu hơn nên bổ sung sau defense.
 - TUI hiện chỉ ở mức tối giản trên stdin: `show statistics`, `show worker`, `reload rule`, `help`, `quit`; chưa có dashboard/JSON API.
 - PCAP tests là software-only, không thay thế benchmark NIC line-rate.

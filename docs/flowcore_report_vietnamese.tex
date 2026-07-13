@@ -675,7 +675,39 @@ Worker không lookup hash lại. Nó tin vào metadata mà dispatcher đã ghi t
 
 SPI Rule Engine đọc file rule dạng CSV. Mỗi rule có tên, điều kiện protocol/IP/port và action. Dấu \code{*} nghĩa là bỏ qua field đó. Rule đầu tiên match sẽ quyết định action. Các action \code{LOG} và \code{COUNT} hiện được normalize thành FORWARD để không đưa logging đồng bộ vào worker hot path.
 
-Rule reload dùng hai bảng tĩnh. Stats thread load rule mới vào bảng inactive. Nếu parse thành công, con trỏ active được đổi bằng atomic store. Nếu parse thất bại, bảng active cũ vẫn được giữ.
+\subsection{Reload rule runtime}
+
+FlowCore hỗ trợ reload rule khi chương trình đang chạy, không cần dừng datapath. Có hai cách yêu cầu reload:
+
+\begin{itemize}
+    \item Gửi tín hiệu \code{SIGUSR1} tới process FlowCore. Signal handler trong \code{app\_init.c} không parse file ngay, mà chỉ gọi \code{spi\_rule\_engine\_request\_reload()}.
+    \item Gõ lệnh \code{reload rule} trong TUI. Stats thread nhận lệnh này và cũng gọi cùng hàm request reload.
+\end{itemize}
+
+Hàm request reload chỉ set cờ \code{g\_reload\_requested}. Đây là điểm quan trọng: signal handler và TUI không làm việc nặng như mở file, parse CSV hay đổi rule table trực tiếp. Việc reload thật được dồn về stats thread để tránh làm gián đoạn dispatcher/worker.
+
+Trong mỗi vòng lặp, stats thread gọi \code{spi\_rule\_engine\_reload\_if\_needed()}. Nếu cờ reload chưa được bật, hàm trả về ngay. Nếu cờ đã bật, hàm dùng atomic exchange để lấy yêu cầu reload và xóa cờ, nhờ đó nhiều request liên tiếp có thể được gộp lại thành một lần reload thực tế.
+
+SPI Engine dùng hai bảng rule tĩnh:
+
+\begin{center}
+\code{g\_rule\_tables[0]} và \code{g\_rule\_tables[1]}
+\end{center}
+
+Tại một thời điểm, con trỏ \code{g\_active\_rules} trỏ tới bảng đang được worker sử dụng. Khi reload, stats thread chọn bảng còn lại làm inactive table, parse lại file rule vào bảng này, rồi chỉ đổi \code{g\_active\_rules} nếu toàn bộ file parse thành công. Luồng xử lý là:
+
+\begin{enumerate}
+    \item Load con trỏ active hiện tại bằng atomic acquire.
+    \item Chọn bảng inactive là bảng không được active trỏ tới.
+    \item Gọi \code{load\_rule\_file()} để đọc lại file rule từ \code{rules.cfg}.
+    \item Nếu mở file lỗi, sai format, sai protocol/IP/port/action hoặc vượt \code{SPI\_MAX\_RULES}, reload thất bại và bảng active cũ vẫn được giữ nguyên.
+    \item Nếu parse thành công, tăng \code{version} của bảng inactive lên \code{active->version + 1}.
+    \item Store con trỏ \code{g\_active\_rules} sang bảng inactive bằng atomic release.
+\end{enumerate}
+
+Worker khi match rule không giữ lock. Mỗi lần cần kiểm tra policy, worker gọi \code{spi\_rule\_engine\_match\_cold()}, hàm này load \code{g\_active\_rules} bằng atomic acquire rồi duyệt rule trong bảng active. Vì chỉ đổi con trỏ sau khi bảng inactive đã được parse xong, worker luôn thấy một bảng rule hoàn chỉnh: hoặc version cũ, hoặc version mới. Không có trạng thái worker đọc một bảng đang parse dở.
+
+Thiết kế này có một số tradeoff rõ ràng. Ưu điểm là reload không khóa worker hot path, parse lỗi không làm mất rule đang chạy, và version rule tăng giúp quan sát reload qua thống kê runtime. Nhược điểm là rule mới không có hiệu lực đúng tại thời điểm gõ lệnh, mà có hiệu lực sau vòng xử lý kế tiếp của stats thread. Ngoài ra, packet đang in-flight có thể được xử lý bằng rule version cũ hoặc mới tùy thời điểm worker load con trỏ active; đây là tradeoff chấp nhận được vì mục tiêu là giữ datapath không bị pause khi reload.
 
 \section{Thống kê runtime}
 
