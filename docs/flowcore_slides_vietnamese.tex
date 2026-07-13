@@ -18,8 +18,7 @@
 \DeclareRobustCommand{\code}[1]{{\scriptsize\ttfamily #1}}
 \renewcommand{\arraystretch}{1.14}
 
-\title[FlowCore DPDK]{FlowCore: Quản lý Flow Table hiệu năng cao bằng DPDK}
-\subtitle{Pipeline có trạng thái: RX, Flow Table, Worker, SPI, Aging và Replacement}
+\title[Flow Table DPDK]{Hệ thống phân tải luồng và quản lý Flow Table hiệu năng cao}
 \author{Trần Phúc Long}
 \institute{VDT 2026}
 \date{\today}
@@ -33,17 +32,17 @@
 \textbf{Vấn đề cần giải quyết}
 \begin{itemize}
     \item Data plane không chỉ chuyển tiếp packet rời rạc; nó phải biết packet thuộc flow nào và giữ trạng thái của flow đó.
-    \item Nếu lookup flow chậm, dùng khóa toàn cục hoặc nhiều core cùng ghi counter chung, throughput sẽ bị giới hạn bởi lock và cache-line bouncing.
-    \item Linux kernel path linh hoạt nhưng khó tối ưu cho một pipeline polling cố định chỉ làm RX, lookup, worker và TX.
+    \item Yêu cầu phân tải lưu lượng đều trên các CPU core để tối ưu hóa phần cứng
+    \item Giới hạn của Linux kernel sinh ra nhiều overhead khi xử lí gói tin. 
 \end{itemize}
 
 \vspace{0.15cm}
-\textbf{Mục tiêu của FlowCore}
+\textbf{Mục tiêu xây dựng Flow Table}
 \begin{itemize}
     \item Nhận IPv4 TCP/UDP, trích xuất 5-tuple, lookup hoặc tạo flow, rồi chuyển packet đến đúng worker.
     \item Giữ flow affinity: packet cùng flow đi về cùng worker.
     \item Có aging, overload replacement, SPI rule, hot reload rule và thống kê runtime.
-    \item Phạm vi hiện tại: 4 worker, Flow Table khoảng 1 triệu entry, baseline bằng PCAP PMD và \code{net\_null}.
+    \item Flow Table khoảng 1 triệu entry benchmark bằng testpmd/memif.
 \end{itemize}
 \end{frame}
 
@@ -330,54 +329,62 @@ Overload replacement & Hash nhỏ \code{HASH\_ENTRIES=64}, thêm flow đến khi
 Các test xác nhận logic và regression trong môi trường software-only; chúng chưa thay thế benchmark bằng NIC thật.
 \end{frame}
 
-\begin{frame}{Kết quả hiệu năng: fixed-packet sweep}
+\begin{frame}{Kết quả hiệu năng: flow sweep}
 \small
-\textbf{Kịch bản:} replay 1 triệu packet, số liệu lấy từ JSON trong thư mục \code{pcap/}.
+\textbf{Kịch bản:} \code{dpdk-testpmd} chế độ \code{flowgen}, kết nối với FlowCore qua \code{memif}. Throughput dùng TX PPS vì đây là số packet đã đi hết pipeline.
 
 \vspace{0.2cm}
 \centering
-\footnotesize
-\begin{tabularx}{0.92\textwidth}{|C{2.4cm}|C{2.7cm}|C{2.7cm}|C{2.4cm}|C{1.6cm}|}
+\scriptsize
+\begin{tabularx}{0.98\textwidth}{|C{1.75cm}|C{2.05cm}|C{1.95cm}|C{1.75cm}|>{\centering\arraybackslash}X|}
 \hline
-\textbf{Số flow} & \textbf{Best RX PPS} & \textbf{Best TX PPS} & \textbf{Active flow} & \textbf{TX drop} \\
+\textbf{Flow cấu hình} & \textbf{TX throughput} & \textbf{Active flow} & \textbf{Create/s} & \textbf{Delete/s} \\
 \hline
-10,000 & 9,149,536 & 9,149,504 & 10,000 & 0 \\
+500k & 9.22 Mpps & 500k & 0 & 0 \\
 \hline
-100,000 & 8,808,576 & 8,808,608 & 100,000 & 0 \\
+1.0M & 9.07 Mpps & 1.00M & 0 & 0 \\
 \hline
-1,000,000 & 10,474,336 & 10,471,294 & 1,000,000 & 0 \\
+1.1M & 3.32 Mpps & 1.03M & 407k & 369k \\
+\hline
+1.2M & 2.35 Mpps & 1.03M & 481k & 379k \\
+\hline
+1.5M & 1.28 Mpps & 1.01M & 495k & 407k \\
+\hline
+2.0M & 0.78 Mpps & 1.03M & 444k & 359k \\
 \hline
 \end{tabularx}
-
-\vspace{0.25cm}
-\footnotesize
-Cách đọc kết quả: bảng này tốt cho so sánh regression phần mềm. Nó chứng minh binary xử lý được lượng flow lớn trong setup hiện tại, nhưng chưa chứng minh line-rate trên NIC thật.
 \end{frame}
 
-\begin{frame}{Kết quả hiệu năng: PCAP PMD + \code{net\_null}}
+\begin{frame}{Đọc kết quả hiệu năng}
 \small
-\textbf{Kịch bản:} flow sweep bằng PCAP PMD làm RX và \code{net\_null} làm TX.
+\begin{itemize}
+    \item 500k và 1M flow: throughput khoảng 9 Mpps, TX drop = 0, ring drop = 0, hash add fail = 0.
+    \item Từ 1.1M flow trở lên: workload vượt dung lượng hiệu dụng của Flow Table, pressure chuyển sang \code{AGGRESSIVE}.
+    \item Active flow thực tế được giữ quanh 1.01--1.03M flow; snapshot cao nhất là 1,032,655 active flow ở kịch bản 1.2M.
+    \item Throughput giảm trong vùng overload vì hệ thống phải add flow mới, evict victim, retry add và reclaim liên tục.
+    \item Trong các snapshot này, TX drop và ring drop đều bằng 0; replacement fail cũng bằng 0.
+\end{itemize}
 
-\vspace{0.2cm}
+\vspace{0.1cm}
 \centering
-\footnotesize
-\begin{tabularx}{0.92\textwidth}{|C{2.1cm}|C{2.6cm}|C{2.6cm}|C{2.0cm}|C{2.0cm}|}
+\scriptsize
+\begin{tabularx}{0.95\textwidth}{|C{1.5cm}|C{2.0cm}|C{2.0cm}|C{2.1cm}|C{1.6cm}|}
 \hline
-\textbf{Số flow} & \textbf{Best RX PPS} & \textbf{Best TX PPS} & \textbf{Bộ nhớ} & \textbf{Mbufs} \\
+\textbf{Flow} & \textbf{Pressure} & \textbf{Hash fail/s} & \textbf{Replacement attempts} & \textbf{TX/Ring drop} \\
 \hline
-1,000 & 5,156,896 & 3,952,724 & 512 MB & 32,768 \\
+500k & NORMAL & 0 & 0 & 0/0 \\
 \hline
-10,000 & 5,700,928 & 3,987,980 & 512 MB & 32,768 \\
+1.0M & PRESSURE & 0 & 0 & 0/0 \\
 \hline
-100,000 & 3,514,752 & 2,727,777 & 1024 MB & 100,000 \\
+1.1M & AGGRESSIVE & 2,092 & 80,450 & 0/0 \\
 \hline
-1,000,000 & 5,151,200 & 181,844 & 2048 MB & 600,000 \\
+1.2M & AGGRESSIVE & 4,633 & 76,109 & 0/0 \\
+\hline
+1.5M & AGGRESSIVE & 7,868 & 134,327 & 0/0 \\
+\hline
+2.0M & AGGRESSIVE & 6,075 & 51,794 & 0/0 \\
 \hline
 \end{tabularx}
-
-\vspace{0.25cm}
-\footnotesize
-Điểm cần nói khi bảo vệ: TX PPS ở một số kịch bản bị ảnh hưởng mạnh bởi môi trường PCAP/software và cấu hình mbuf, nên không dùng số này để kết luận giới hạn cuối của kiến trúc.
 \end{frame}
 
 \begin{frame}{Nhược điểm còn tồn tại}
@@ -388,7 +395,7 @@ Cách đọc kết quả: bảng này tốt cho so sánh regression phần mềm
     \item SPI rule matching tuyến tính theo số rule; rule set lớn sẽ cần indexing hoặc DPDK ACL.
     \item Aging dùng hash iterator theo chunk; khi scale lên nhiều triệu flow hơn nữa, timing wheel hoặc expiry bucket sẽ ổn định hơn.
     \item Replacement không phải exact LRU; nó là policy thực dụng dựa trên idle time, iterator và victim cache.
-    \item Benchmark hiện là software-only; chưa có kết quả với NIC thật, RSS, NUMA pinning và traffic generator.
+    \item Benchmark hiện dùng testpmd/memif trên cùng máy; chưa có kết quả với NIC thật, RSS, NUMA pinning và latency tail.
 \end{itemize}
 \end{frame}
 

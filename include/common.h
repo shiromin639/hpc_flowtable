@@ -15,7 +15,7 @@
 #define MBUF_CACHE_SIZE 250
 #define RX_DESC_PER_QUEUE 1024
 #define TX_DESC_PER_QUEUE 1024
-#define RING_SIZE      32768 
+#define RING_SIZE     8192 
 #ifndef HASH_ENTRIES
 #define HASH_ENTRIES    (1024 * 1024)   /* 1M entries */
 #endif

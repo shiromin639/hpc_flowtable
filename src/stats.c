@@ -7,15 +7,27 @@
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <stdio.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/select.h>
+#include <termios.h>
 #include <unistd.h>
 
 enum stats_tui_view {
     STATS_TUI_STATISTICS = 0,
     STATS_TUI_WORKERS,
+};
+
+struct stats_tui_state {
+    enum stats_tui_view view;
+    struct termios original_termios;
+    char message[128];
+    char input[128];
+    size_t input_len;
+    int stdin_closed;
+    int raw_mode_enabled;
 };
 
 static char *
@@ -38,35 +50,59 @@ trim_command(char *line)
 }
 
 static void
-set_tui_message(char *message, size_t message_len, const char *text)
+set_tui_message(struct stats_tui_state *tui, const char *text)
 {
-    snprintf(message, message_len, "%s", text);
+    snprintf(tui->message, sizeof(tui->message), "%s", text);
 }
 
 static void
-poll_tui_command(enum stats_tui_view *view, char *message, size_t message_len)
+print_tui_prompt(const struct stats_tui_state *tui)
 {
-    static int stdin_closed;
-    struct timeval timeout = { 0, 0 };
-    fd_set readfds;
-    char line[128];
+    printf("\r\033[Kflowcore> %s", tui->input);
+    fflush(stdout);
+}
+
+static void
+stats_tui_init(struct stats_tui_state *tui)
+{
+    struct termios raw_termios;
+
+    memset(tui, 0, sizeof(*tui));
+    tui->view = STATS_TUI_STATISTICS;
+    set_tui_message(tui,
+            "commands: show statistics | show worker | reload rule");
+
+    if (!isatty(STDIN_FILENO))
+        return;
+
+    if (tcgetattr(STDIN_FILENO, &tui->original_termios) != 0)
+        return;
+
+    raw_termios = tui->original_termios;
+    raw_termios.c_lflag &= ~(ICANON | ECHO);
+    raw_termios.c_cc[VMIN] = 0;
+    raw_termios.c_cc[VTIME] = 0;
+
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw_termios) == 0)
+        tui->raw_mode_enabled = 1;
+}
+
+static void
+stats_tui_destroy(struct stats_tui_state *tui)
+{
+    if (tui->raw_mode_enabled)
+        tcsetattr(STDIN_FILENO, TCSANOW, &tui->original_termios);
+}
+
+static void
+execute_tui_command(struct stats_tui_state *tui)
+{
+    char line[sizeof(tui->input)];
     char *cmd;
-    int ready;
 
-    if (stdin_closed)
-        return;
-
-    FD_ZERO(&readfds);
-    FD_SET(STDIN_FILENO, &readfds);
-
-    ready = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout);
-    if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &readfds))
-        return;
-
-    if (fgets(line, sizeof(line), stdin) == NULL) {
-        stdin_closed = 1;
-        return;
-    }
+    snprintf(line, sizeof(line), "%s", tui->input);
+    tui->input_len = 0;
+    tui->input[0] = '\0';
 
     cmd = trim_command(line);
     if (*cmd == '\0')
@@ -74,16 +110,16 @@ poll_tui_command(enum stats_tui_view *view, char *message, size_t message_len)
 
     if (strcasecmp(cmd, "show statistics") == 0 ||
         strcasecmp(cmd, "stats") == 0) {
-        *view = STATS_TUI_STATISTICS;
-        set_tui_message(message, message_len, "showing statistics");
+        tui->view = STATS_TUI_STATISTICS;
+        set_tui_message(tui, "showing statistics");
         return;
     }
 
     if (strcasecmp(cmd, "show worker") == 0 ||
         strcasecmp(cmd, "show workers") == 0 ||
         strcasecmp(cmd, "workers") == 0) {
-        *view = STATS_TUI_WORKERS;
-        set_tui_message(message, message_len, "showing worker details");
+        tui->view = STATS_TUI_WORKERS;
+        set_tui_message(tui, "showing worker details");
         return;
     }
 
@@ -91,24 +127,100 @@ poll_tui_command(enum stats_tui_view *view, char *message, size_t message_len)
         strcasecmp(cmd, "reload rules") == 0 ||
         strcasecmp(cmd, "reload") == 0) {
         spi_rule_engine_request_reload();
-        set_tui_message(message, message_len, "rule reload requested");
+        set_tui_message(tui, "rule reload requested");
         return;
     }
 
     if (strcasecmp(cmd, "help") == 0) {
-        set_tui_message(message, message_len,
+        set_tui_message(tui,
                 "commands: show statistics | show worker | reload rule | quit");
         return;
     }
 
     if (strcasecmp(cmd, "quit") == 0 || strcasecmp(cmd, "exit") == 0) {
         force_quit = 1;
-        set_tui_message(message, message_len, "quit requested");
+        set_tui_message(tui, "quit requested");
         return;
     }
 
-    set_tui_message(message, message_len,
+    set_tui_message(tui,
             "unknown command; try: show statistics | show worker | reload rule");
+}
+
+static void
+poll_tui_command(struct stats_tui_state *tui)
+{
+    struct timeval timeout = { 0, 0 };
+    fd_set readfds;
+    int ready;
+
+    if (tui->stdin_closed)
+        return;
+
+    for (;;) {
+        char ch;
+        ssize_t nread;
+
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
+
+        ready = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout);
+        if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &readfds))
+            return;
+
+        nread = read(STDIN_FILENO, &ch, sizeof(ch));
+        if (nread == 0) {
+            tui->stdin_closed = 1;
+            return;
+        }
+        if (nread < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+                return;
+            tui->stdin_closed = 1;
+            return;
+        }
+
+        if (ch == '\n' || ch == '\r') {
+            execute_tui_command(tui);
+            print_tui_prompt(tui);
+            continue;
+        }
+
+        if (ch == 4) {
+            force_quit = 1;
+            set_tui_message(tui, "quit requested");
+            return;
+        }
+
+        if (ch == 21) {
+            tui->input_len = 0;
+            tui->input[0] = '\0';
+            print_tui_prompt(tui);
+            continue;
+        }
+
+        if (ch == 8 || ch == 127) {
+            if (tui->input_len > 0)
+                tui->input[--tui->input_len] = '\0';
+            print_tui_prompt(tui);
+            continue;
+        }
+
+        if (ch == 27)
+            continue;
+
+        if (ch < 32 || ch >= 127)
+            continue;
+
+        if (tui->input_len + 1 >= sizeof(tui->input)) {
+            set_tui_message(tui, "command too long");
+            continue;
+        }
+
+        tui->input[tui->input_len++] = ch;
+        tui->input[tui->input_len] = '\0';
+        print_tui_prompt(tui);
+    }
 }
 
 int
@@ -127,9 +239,9 @@ stats_thread(__rte_unused void *arg)
     struct lcore_stats *local_stats = stats_get_current();
     uint64_t prev_tsc = rte_rdtsc();
     uint64_t tsc_hz = rte_get_tsc_hz();
-    enum stats_tui_view tui_view = STATS_TUI_STATISTICS;
-    char tui_message[128] = "commands: show statistics | show worker | reload rule";
+    struct stats_tui_state tui;
 
+    stats_tui_init(&tui);
     flow_table_rcu_register(lcore_id);
 
     printf("Stats/Aging thread on lcore %u (RCU registered)\n", lcore_id);
@@ -145,7 +257,7 @@ stats_thread(__rte_unused void *arg)
         if (force_quit)
             break;
 
-        poll_tui_command(&tui_view, tui_message, sizeof(tui_message));
+        poll_tui_command(&tui);
         if (force_quit)
             break;
 
@@ -234,7 +346,7 @@ stats_thread(__rte_unused void *arg)
         uint32_t victim_cache_count = flow_table_victim_cache_count();
 
         printf("\033[1;1H\033[J");
-        if (tui_view == STATS_TUI_STATISTICS) {
+        if (tui.view == STATS_TUI_STATISTICS) {
             printf("================ PERFORMANCE STATS ================\n");
             printf("RX Throughput : %10"PRIu64" PPS | %10"PRIu64" Mbps\n",
                    pps_rx, mbps_rx);
@@ -334,7 +446,7 @@ stats_thread(__rte_unused void *arg)
             printf("=====================================================\n");
         }
 
-        if (tui_view != STATS_TUI_WORKERS) {
+        if (tui.view != STATS_TUI_WORKERS) {
             for (int w = 0; w < NUM_WORKERS; w++) {
                 unsigned int wl = worker_lcore_ids[w];
                 const struct lcore_stats *worker_stats = stats_get_lcore(wl);
@@ -348,14 +460,14 @@ stats_thread(__rte_unused void *arg)
             }
         }
 
-        printf("\nTUI: %s\n", tui_message);
+        printf("\nTUI: %s\n", tui.message);
         printf("Commands: show statistics | show worker | reload rule | help | quit\n");
-        printf("flowcore> ");
-        fflush(stdout);
+        print_tui_prompt(&tui);
 
         prev_totals = totals;
         prev_tsc = now_tsc;
     }
+    stats_tui_destroy(&tui);
     flow_table_rcu_unregister(lcore_id);
     return 0;
 }
